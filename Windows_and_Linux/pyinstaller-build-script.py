@@ -5,7 +5,7 @@ import sys
 
 def run_pyinstaller_build():
     pyinstaller_command = [
-        "pyinstaller",
+        sys.executable, "-m", "PyInstaller",
         "--onefile",
         "--windowed",
         "--icon=icons/app_icon.ico",

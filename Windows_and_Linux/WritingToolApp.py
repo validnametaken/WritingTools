@@ -14,7 +14,8 @@ import ui.CustomPopupWindow
 import ui.OnboardingWindow
 import ui.ResponseWindow
 import ui.SettingsWindow
-from aiprovider import GeminiProvider, OllamaProvider, OpenAICompatibleProvider, obfuscate_api_key
+import ui.VariationPreviewWindow
+from aiprovider import GeminiProvider, OllamaProvider, OpenAICompatibleProvider, obfuscate_api_key, parse_variations_response
 from pynput import keyboard as pykeyboard
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QLocale, Signal, Slot
@@ -46,6 +47,7 @@ class WritingToolApp(QtWidgets.QApplication):
     show_message_signal = Signal(str, str)  # a signal for showing message boxes
     hotkey_triggered_signal = Signal()
     followup_response_signal = Signal(str)
+    show_variation_preview_signal = Signal(str, list)
 
 
     def __init__(self, argv):
@@ -55,6 +57,7 @@ class WritingToolApp(QtWidgets.QApplication):
         self.output_ready_signal.connect(self.replace_text)
         self.show_message_signal.connect(self.show_message_box)
         self.hotkey_triggered_signal.connect(self.on_hotkey_pressed)
+        self.show_variation_preview_signal.connect(self._show_variation_preview_window)
         self.config = None
         self.config_path = None
         self.load_config()
@@ -747,9 +750,25 @@ class WritingToolApp(QtWidgets.QApplication):
                     )
                     logging.debug('Invoked set_text on response window')
             else:
-                logging.debug('Getting response for direct replacement')
-                self.current_provider.get_response(system_instruction, prompt)
-                logging.debug('Response processed')
+                logging.debug('Getting 3 variations for preview window selection')
+                multi_variation_instruction = (
+                    system_instruction + "\n\n"
+                    "CRITICAL REQUIREMENT: Provide exactly THREE (3) distinct writing variations or rewrites for the user's text based on the requested command.\n"
+                    "Format your response ONLY as a JSON object with the structure:\n"
+                    "{\n"
+                    '  "variations": [\n'
+                    '    {"label": "Option 1: Concise / Direct", "text": "First variation..."},\n'
+                    '    {"label": "Option 2: Professional / Polished", "text": "Second variation..."},\n'
+                    '    {"label": "Option 3: Natural / Casual", "text": "Third variation..."}\n'
+                    "  ]\n"
+                    "}\n"
+                    "Do not include any additional chat or commentary outside the JSON."
+                )
+                response = self.current_provider.get_response(multi_variation_instruction, prompt, return_response=True)
+                variations = parse_variations_response(response)
+                logging.debug(f'Parsed {len(variations)} variations for option {option}')
+
+                self.show_variation_preview_signal.emit(selected_text, variations)
 
         except Exception as e:
             logging.error(f'An error occurred: {e}', exc_info=True)
@@ -758,6 +777,78 @@ class WritingToolApp(QtWidgets.QApplication):
                 self.show_message_signal.emit('Error - Rate Limit Hit', 'Whoops! You\'ve hit the per-minute rate limit of the Gemini API. Please try again in a few moments.\n\nIf this happens often, simply switch to a Gemini model with a higher usage limit in Settings.')
             else:
                 self.show_message_signal.emit('Error', f'An error occurred: {e}')
+
+    @Slot(str, list)
+    def _show_variation_preview_window(self, selected_text, variations):
+        """
+        Shows the VariationPreviewWindow on the main UI thread.
+        """
+        try:
+            preview_window = ui.VariationPreviewWindow.VariationPreviewWindow(
+                parent=None,
+                original_text=selected_text,
+                variations=variations
+            )
+            # Position preview window near cursor
+            cursor_pos = QCursor.pos()
+            screen = QGuiApplication.screenAt(cursor_pos)
+            if screen is None:
+                screen = QGuiApplication.primaryScreen()
+            screen_geom = screen.geometry()
+
+            preview_window.show()
+            preview_window.adjustSize()
+
+            w = preview_window.width()
+            h = preview_window.height()
+            x = cursor_pos.x()
+            y = cursor_pos.y() + 20
+
+            if x + w > screen_geom.right():
+                x = screen_geom.right() - w
+            if y + h > screen_geom.bottom():
+                y = cursor_pos.y() - h - 10
+
+            preview_window.move(x, y)
+            preview_window.activateWindow()
+
+            if preview_window.exec_() == QtWidgets.QDialog.Accepted and preview_window.selected_variation:
+                logging.debug('User selected a variation from preview window')
+                self.paste_selected_variation(preview_window.selected_variation)
+            else:
+                logging.debug('User cancelled variation preview window')
+
+        except Exception as e:
+            logging.error(f'Error displaying variation preview window: {e}', exc_info=True)
+
+    def paste_selected_variation(self, text):
+        """
+        Copies selected variation to clipboard, simulates Ctrl+V paste into active application,
+        and restores previous clipboard content.
+        """
+        try:
+            clipboard_backup = pyperclip.paste()
+        except Exception:
+            clipboard_backup = ''
+
+        try:
+            cleaned_text = text.rstrip('\n')
+            pyperclip.copy(cleaned_text)
+
+            kbrd = pykeyboard.Controller()
+            kbrd.press(pykeyboard.Key.ctrl.value)
+            kbrd.press('v')
+            kbrd.release('v')
+            kbrd.release(pykeyboard.Key.ctrl.value)
+
+            time.sleep(0.2)
+        except Exception as e:
+            logging.error(f'Error pasting selected variation: {e}')
+        finally:
+            try:
+                pyperclip.copy(clipboard_backup)
+            except Exception as e:
+                logging.error(f'Error restoring clipboard after variation paste: {e}')
 
     @Slot(str, str)
     def show_message_box(self, title, message):

@@ -32,7 +32,9 @@ Note: Streaming has been fully removed throughout the code.
 """
 
 import base64
+import json
 import logging
+import re
 import webbrowser
 from abc import ABC, abstractmethod
 from typing import List
@@ -72,6 +74,92 @@ def deobfuscate_api_key(obfuscated: str) -> str:
     encoded = obfuscated[len(_OBFUSCATION_PREFIX):]
     xored = base64.b64decode(encoded)
     return bytes([b ^ _XOR_KEY for b in xored]).decode('utf-8')
+
+
+def parse_variations_response(raw_text: str) -> list:
+    """
+    Parses an LLM response requesting 3 variations into a structured list of dicts:
+    [{"label": "Option 1: ...", "text": "..."}, ...]
+    Supports JSON formatting, delimiter blocks (e.g. ---VARIATION 1---), and plain text fallback.
+    """
+    if not raw_text or not isinstance(raw_text, str):
+        return [{"label": "Option 1", "text": ""}]
+
+    cleaned = raw_text.strip()
+
+    # 1. Try JSON parsing (direct or extracted from markdown block)
+    json_str = cleaned
+    if "```" in json_str:
+        match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", json_str, re.IGNORECASE)
+        if match:
+            json_str = match.group(1).strip()
+
+    start_json = min([pos for pos in (json_str.find('{'), json_str.find('[')) if pos != -1], default=-1)
+    if start_json != -1:
+        end_json = max(json_str.rfind('}'), json_str.rfind(']'))
+        if end_json > start_json:
+            json_candidate = json_str[start_json:end_json + 1]
+            try:
+                data = json.loads(json_candidate)
+                variations = []
+                if isinstance(data, dict):
+                    if "variations" in data and isinstance(data["variations"], list):
+                        for idx, item in enumerate(data["variations"]):
+                            if isinstance(item, dict):
+                                lbl = item.get("label") or f"Option {idx + 1}"
+                                txt = item.get("text") or item.get("variation") or ""
+                            else:
+                                lbl = f"Option {idx + 1}"
+                                txt = str(item)
+                            if txt.strip():
+                                variations.append({"label": lbl, "text": txt.strip()})
+                    else:
+                        default_labels = ["Option 1: Concise / Direct", "Option 2: Professional / Polished", "Option 3: Natural / Casual"]
+                        for idx, (k, v) in enumerate(data.items()):
+                            lbl = default_labels[idx] if idx < len(default_labels) else k
+                            if isinstance(v, str) and v.strip():
+                                variations.append({"label": lbl, "text": v.strip()})
+
+                elif isinstance(data, list):
+                    default_labels = ["Option 1: Concise / Direct", "Option 2: Professional / Polished", "Option 3: Natural / Casual"]
+                    for idx, item in enumerate(data):
+                        lbl = default_labels[idx] if idx < len(default_labels) else f"Option {idx + 1}"
+                        if isinstance(item, str) and item.strip():
+                            variations.append({"label": lbl, "text": item.strip()})
+
+                if len(variations) >= 1:
+                    return variations[:3]
+            except Exception as e:
+                logging.debug(f"JSON parsing fallback: {e}")
+
+    # 2. Try delimiter parsing (e.g. ---VARIATION 1---, Option 1:, etc.)
+    delimiter_pattern = r"(?:^|\n)[ \t]*(?:---|===|###)?[ \t]*(?:VARIATION|OPTION)[ \t]*(\d+)[: \t\-]*([^\r\n]*)"
+    parts = re.split(delimiter_pattern, cleaned, flags=re.IGNORECASE)
+
+    if len(parts) >= 4:
+        variations = []
+        i = 1
+        while i < len(parts) - 2:
+            num = parts[i]
+            lbl_extra = parts[i + 1].strip(" -\t\r\n=#:")
+            text = parts[i + 2].strip()
+            text = re.sub(r"^(?:---|===|###)+\s*", "", text).strip()
+            label = f"Option {num}" + (f": {lbl_extra}" if lbl_extra else "")
+            if text:
+                variations.append({"label": label, "text": text})
+            i += 3
+        if len(variations) >= 1:
+            return variations[:3]
+
+    # 3. Double newline split fallback if we have distinct blocks
+    blocks = [b.strip() for b in cleaned.split("\n\n") if b.strip()]
+    if len(blocks) == 3:
+        labels = ["Option 1: Concise / Direct", "Option 2: Professional / Polished", "Option 3: Natural / Casual"]
+        return [{"label": labels[i], "text": blocks[i]} for i in range(3)]
+
+    # 4. Final fallback: single response
+    return [{"label": "Option 1", "text": cleaned}]
+
 
 
 class AIProviderSetting(ABC):

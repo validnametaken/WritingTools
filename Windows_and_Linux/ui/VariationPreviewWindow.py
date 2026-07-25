@@ -1,15 +1,21 @@
+import difflib
+import html
 import logging
 import os
+import re
 import sys
 from PySide6 import QtCore, QtGui, QtWidgets
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -17,16 +23,69 @@ from PySide6.QtWidgets import (
 from ui.UIUtils import ThemeBackground, colorMode
 
 
+def generate_word_diff_html(original_text: str, variation_text: str) -> str:
+    """
+    Generates clean word-level HTML diff output.
+    Insertions are highlighted in green, deletions in strikethrough red.
+    """
+    if not original_text:
+        return html.escape(variation_text).replace('\n', '<br>')
+
+    # Tokenize preserving words, punctuation, and whitespace
+    def tokenize(text):
+        return re.findall(r'\s+|\w+|[^\w\s]', text, re.UNICODE)
+
+    orig_tokens = tokenize(original_text)
+    var_tokens = tokenize(variation_text)
+
+    matcher = difflib.SequenceMatcher(None, orig_tokens, var_tokens)
+    out_html = []
+
+    is_dark = colorMode == 'dark'
+    ins_style = (
+        'background-color: #1b4d2e; color: #a5d6a7; padding: 1px 3px; border-radius: 3px; font-weight: bold;'
+        if is_dark else
+        'background-color: #d4edda; color: #155724; padding: 1px 3px; border-radius: 3px; font-weight: bold;'
+    )
+    del_style = (
+        'background-color: #4d1b1b; color: #ef9a9a; text-decoration: line-through; padding: 1px 3px; border-radius: 3px;'
+        if is_dark else
+        'background-color: #f8d7da; color: #721c24; text-decoration: line-through; padding: 1px 3px; border-radius: 3px;'
+    )
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            chunk = "".join(var_tokens[j1:j2])
+            out_html.append(html.escape(chunk).replace('\n', '<br>'))
+        elif tag == 'insert':
+            chunk = "".join(var_tokens[j1:j2])
+            escaped = html.escape(chunk).replace('\n', '<br>')
+            out_html.append(f'<span style="{ins_style}">{escaped}</span>')
+        elif tag == 'delete':
+            chunk = "".join(orig_tokens[i1:i2])
+            escaped = html.escape(chunk).replace('\n', '<br>')
+            out_html.append(f'<span style="{del_style}">{escaped}</span>')
+        elif tag == 'replace':
+            del_chunk = "".join(orig_tokens[i1:i2])
+            ins_chunk = "".join(var_tokens[j1:j2])
+            del_escaped = html.escape(del_chunk).replace('\n', '<br>')
+            ins_escaped = html.escape(ins_chunk).replace('\n', '<br>')
+            out_html.append(f'<span style="{del_style}">{del_escaped}</span> <span style="{ins_style}">{ins_escaped}</span>')
+
+    return "".join(out_html)
+
+
 class VariationCard(QWidget):
     """
-    A card widget displaying a single variation option.
-    Clicking the card or its selection button chooses this variation.
+    A card widget displaying a single variation option with optional diff rendering.
     """
-    selected = QtCore.Signal(str)
+    selected = Signal(str)
 
-    def __init__(self, index, label_text, variation_text, parent=None):
+    def __init__(self, index, label_text, variation_text, original_text="", show_diff=False, parent=None):
         super().__init__(parent)
         self.variation_text = variation_text
+        self.original_text = original_text
+        self.show_diff = show_diff
         self.setMouseTracking(True)
         self.setAttribute(QtCore.Qt.WA_Hover, True)
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
@@ -74,12 +133,11 @@ class VariationCard(QWidget):
 
         layout.addLayout(header_layout)
 
-        # Content text display
-        text_display = QPlainTextEdit()
-        text_display.setPlainText(self.variation_text)
-        text_display.setReadOnly(True)
-        text_display.setStyleSheet(f"""
-            QPlainTextEdit {{
+        # Content text display (QTextEdit supports both HTML diff and plain text)
+        self.text_display = QTextEdit()
+        self.text_display.setReadOnly(True)
+        self.text_display.setStyleSheet(f"""
+            QTextEdit {{
                 background-color: transparent;
                 color: {'#E0E0E0' if colorMode == 'dark' else '#212121'};
                 border: none;
@@ -88,13 +146,8 @@ class VariationCard(QWidget):
             }}
         """)
 
-        # Auto-adjust height based on document height up to max
-        doc = text_display.document()
-        doc.adjustSize()
-        h = int(doc.size().height()) + 20
-        text_display.setFixedHeight(min(max(h, 60), 160))
-
-        layout.addWidget(text_display)
+        self._update_text_display()
+        layout.addWidget(self.text_display)
 
         # Main Card Styling
         self.setStyleSheet(f"""
@@ -108,6 +161,22 @@ class VariationCard(QWidget):
             }}
         """)
 
+    def set_show_diff(self, show_diff):
+        self.show_diff = show_diff
+        self._update_text_display()
+
+    def _update_text_display(self):
+        if self.show_diff:
+            diff_html = generate_word_diff_html(self.original_text, self.variation_text)
+            self.text_display.setHtml(diff_html)
+        else:
+            self.text_display.setPlainText(self.variation_text)
+
+        doc = self.text_display.document()
+        doc.adjustSize()
+        h = int(doc.size().height()) + 20
+        self.text_display.setFixedHeight(min(max(h, 60), 220))
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._on_click()
@@ -119,13 +188,18 @@ class VariationCard(QWidget):
 
 class VariationPreviewWindow(QDialog):
     """
-    Popup dialog presenting 3 LLM-generated writing variations to the user.
+    Popup dialog presenting 3 LLM-generated writing variations to the user,
+    with live refinement/regeneration and visual diff highlighting.
     """
+    refinement_requested = Signal(str, str)  # (original_text, refinement_instruction)
+
     def __init__(self, parent=None, original_text="", variations=None):
         super().__init__(parent)
         self.original_text = original_text
         self.variations = variations or []
         self.selected_variation = None
+        self.show_diff = False
+        self.card_widgets = []
 
         self.init_ui()
 
@@ -133,7 +207,7 @@ class VariationPreviewWindow(QDialog):
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowTitle("Writing Tools - Select Variation")
-        self.resize(520, 580)
+        self.resize(540, 620)
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -163,6 +237,19 @@ class VariationPreviewWindow(QDialog):
             }}
         """)
         top_bar.addWidget(title_label, 1, Qt.AlignLeft | Qt.AlignVCenter)
+
+        # Show Diff Toggle Checkbox
+        self.diff_checkbox = QCheckBox("Show Diff")
+        self.diff_checkbox.setCursor(Qt.PointingHandCursor)
+        self.diff_checkbox.setStyleSheet(f"""
+            QCheckBox {{
+                color: {'#64B5F6' if colorMode == 'dark' else '#1976D2'};
+                font-size: 12px;
+                font-weight: bold;
+            }}
+        """)
+        self.diff_checkbox.toggled.connect(self._on_diff_toggled)
+        top_bar.addWidget(self.diff_checkbox, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         close_btn = QPushButton("×")
         close_btn.setFixedSize(24, 24)
@@ -198,7 +285,7 @@ class VariationPreviewWindow(QDialog):
         orig_display = QPlainTextEdit()
         orig_display.setPlainText(self.original_text)
         orig_display.setReadOnly(True)
-        orig_display.setMaximumHeight(80)
+        orig_display.setMaximumHeight(70)
         orig_display.setStyleSheet(f"""
             QPlainTextEdit {{
                 background-color: {'#252525' if colorMode == 'dark' else '#F5F5F5'};
@@ -211,47 +298,93 @@ class VariationPreviewWindow(QDialog):
         """)
         content_layout.addWidget(orig_display)
 
-        # Variations List
+        # Variations List Header
         var_header = QLabel("Choose a Variation (or press 1, 2, 3):")
         var_header.setStyleSheet(f"""
             QLabel {{
                 color: {'#AAAAAA' if colorMode == 'dark' else '#666666'};
                 font-size: 12px;
                 font-weight: bold;
-                margin-top: 4px;
+                margin-top: 2px;
             }}
         """)
         content_layout.addWidget(var_header)
 
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setStyleSheet("""
+        # Scroll Area for Cards
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setStyleSheet("""
             QScrollArea {
                 background: transparent;
                 border: none;
             }
         """)
 
-        scroll_content = QWidget()
-        scroll_content.setStyleSheet("background: transparent;")
-        scroll_layout = QVBoxLayout(scroll_content)
-        scroll_layout.setContentsMargins(0, 0, 0, 0)
-        scroll_layout.setSpacing(10)
+        self.scroll_content = QWidget()
+        self.scroll_content.setStyleSheet("background: transparent;")
+        self.scroll_layout = QVBoxLayout(self.scroll_content)
+        self.scroll_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll_layout.setSpacing(10)
 
-        for idx, var_info in enumerate(self.variations):
-            lbl = var_info.get("label", f"Variation {idx + 1}")
-            txt = var_info.get("text", "")
-            card = VariationCard(idx, lbl, txt, parent=scroll_content)
-            card.selected.connect(self._on_variation_selected)
-            scroll_layout.addWidget(card)
+        self._render_cards()
 
-        scroll_layout.addStretch()
-        scroll_area.setWidget(scroll_content)
-        content_layout.addWidget(scroll_area, 1)
+        self.scroll_area.setWidget(self.scroll_content)
+        content_layout.addWidget(self.scroll_area, 1)
 
-        # Footer Bar: Cancel / Dismiss button
+        # Live Refinement Input Area
+        refine_layout = QHBoxLayout()
+        refine_layout.setContentsMargins(0, 4, 0, 0)
+        refine_layout.setSpacing(6)
+
+        self.refine_input = QLineEdit()
+        self.refine_input.setPlaceholderText("Refine variations (e.g. 'make option 1 shorter')...")
+        self.refine_input.setStyleSheet(f"""
+            QLineEdit {{
+                padding: 7px;
+                border: 1px solid {'#555555' if colorMode == 'dark' else '#CCCCCC'};
+                border-radius: 6px;
+                background-color: {'#2A2A2A' if colorMode == 'dark' else '#FFFFFF'};
+                color: {'#FFFFFF' if colorMode == 'dark' else '#000000'};
+                font-size: 12px;
+            }}
+        """)
+        self.refine_input.returnPressed.connect(self._on_refine_clicked)
+        refine_layout.addWidget(self.refine_input, 1)
+
+        self.regen_btn = QPushButton("Regenerate")
+        self.regen_btn.setCursor(Qt.PointingHandCursor)
+        self.regen_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {'#0288D1' if colorMode == 'dark' else '#0288D1'};
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 7px 14px;
+                font-weight: bold;
+                font-size: 12px;
+            }}
+            QPushButton:hover {{
+                background-color: {'#01579B' if colorMode == 'dark' else '#01579B'};
+            }}
+        """)
+        self.regen_btn.clicked.connect(self._on_refine_clicked)
+        refine_layout.addWidget(self.regen_btn)
+
+        content_layout.addLayout(refine_layout)
+
+        # Footer Bar: Status & Cancel / Dismiss button
         footer_layout = QHBoxLayout()
-        footer_layout.setContentsMargins(0, 4, 0, 0)
+        footer_layout.setContentsMargins(0, 2, 0, 0)
+
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet(f"""
+            QLabel {{
+                color: {'#81C784' if colorMode == 'dark' else '#2E7D32'};
+                font-size: 12px;
+                font-weight: bold;
+            }}
+        """)
+        footer_layout.addWidget(self.status_label, 1, Qt.AlignLeft | Qt.AlignVCenter)
 
         cancel_btn = QPushButton("Cancel / Dismiss (Esc)")
         cancel_btn.setCursor(Qt.PointingHandCursor)
@@ -269,10 +402,62 @@ class VariationPreviewWindow(QDialog):
             }}
         """)
         cancel_btn.clicked.connect(self.reject)
-        footer_layout.addStretch()
-        footer_layout.addWidget(cancel_btn)
+        footer_layout.addWidget(cancel_btn, 0, Qt.AlignRight)
 
         content_layout.addLayout(footer_layout)
+
+    def _render_cards(self):
+        # Clear existing cards
+        while self.scroll_layout.count():
+            item = self.scroll_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        self.card_widgets.clear()
+        for idx, var_info in enumerate(self.variations):
+            lbl = var_info.get("label", f"Variation {idx + 1}")
+            txt = var_info.get("text", "")
+            card = VariationCard(
+                idx, lbl, txt,
+                original_text=self.original_text,
+                show_diff=self.show_diff,
+                parent=self.scroll_content
+            )
+            card.selected.connect(self._on_variation_selected)
+            self.scroll_layout.addWidget(card)
+            self.card_widgets.append(card)
+
+        self.scroll_layout.addStretch()
+
+    def _on_diff_toggled(self, checked):
+        self.show_diff = checked
+        for card in self.card_widgets:
+            card.set_show_diff(checked)
+
+    def _on_refine_clicked(self):
+        text = self.refine_input.text().strip()
+        if not text:
+            return
+        self.set_loading_state(True)
+        self.refinement_requested.emit(self.original_text, text)
+
+    @Slot(list)
+    def update_variations(self, new_variations):
+        """
+        Updates cards with new variations and restores idle state.
+        """
+        self.variations = new_variations
+        self._render_cards()
+        self.set_loading_state(False)
+        self.refine_input.clear()
+
+    def set_loading_state(self, is_loading):
+        self.regen_btn.setEnabled(not is_loading)
+        self.refine_input.setEnabled(not is_loading)
+        if is_loading:
+            self.status_label.setText("Generating new variations...")
+        else:
+            self.status_label.setText("")
 
     def _on_variation_selected(self, text):
         self.selected_variation = text

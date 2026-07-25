@@ -48,16 +48,19 @@ class WritingToolApp(QtWidgets.QApplication):
     hotkey_triggered_signal = Signal()
     followup_response_signal = Signal(str)
     show_variation_preview_signal = Signal(str, list)
+    update_preview_variations_signal = Signal(list)
 
 
     def __init__(self, argv):
         super().__init__(argv)
         self.current_response_window = None
+        self.current_preview_window = None
         logging.debug('Initializing WritingToolApp')
         self.output_ready_signal.connect(self.replace_text)
         self.show_message_signal.connect(self.show_message_box)
         self.hotkey_triggered_signal.connect(self.on_hotkey_pressed)
         self.show_variation_preview_signal.connect(self._show_variation_preview_window)
+        self.update_preview_variations_signal.connect(self._update_current_preview_variations)
         self.config = None
         self.config_path = None
         self.load_config()
@@ -789,6 +792,9 @@ class WritingToolApp(QtWidgets.QApplication):
                 original_text=selected_text,
                 variations=variations
             )
+            self.current_preview_window = preview_window
+            preview_window.refinement_requested.connect(self._handle_refinement_request)
+
             # Position preview window near cursor
             cursor_pos = QCursor.pos()
             screen = QGuiApplication.screenAt(cursor_pos)
@@ -820,6 +826,57 @@ class WritingToolApp(QtWidgets.QApplication):
 
         except Exception as e:
             logging.error(f'Error displaying variation preview window: {e}', exc_info=True)
+        finally:
+            self.current_preview_window = None
+
+    @Slot(str, str)
+    def _handle_refinement_request(self, original_text, instruction):
+        """
+        Handles async refinement request from the VariationPreviewWindow.
+        """
+        logging.debug(f'Processing refinement request: {instruction}')
+
+        def _refinement_worker():
+            try:
+                multi_variation_instruction = (
+                    "You are a writing assistant. The user wants to refine previous writing variations based on a specific request.\n"
+                    "Provide exactly THREE (3) distinct new writing variations/rewrites for the user's text following the refinement instruction.\n"
+                    "Format your output ONLY as a JSON object with the structure:\n"
+                    "{\n"
+                    '  "variations": [\n'
+                    '    {"label": "Option 1: Concise / Direct", "text": "First variation..."},\n'
+                    '    {"label": "Option 2: Professional / Polished", "text": "Second variation..."},\n'
+                    '    {"label": "Option 3: Natural / Casual", "text": "Third variation..."}\n'
+                    "  ]\n"
+                    "}\n"
+                    "Do not include any extra chat or commentary outside the JSON."
+                )
+                prompt = f"Original Text:\n{original_text}\n\nRefinement Instruction: {instruction}"
+                response = self.current_provider.get_response(multi_variation_instruction, prompt, return_response=True)
+                variations = parse_variations_response(response)
+                logging.debug(f'Parsed {len(variations)} refined variations')
+
+                self.update_preview_variations_signal.emit(variations)
+            except Exception as e:
+                logging.error(f'Error processing refinement: {e}', exc_info=True)
+                self.show_message_signal.emit('Error', f'Failed to regenerate variations: {e}')
+                if self.current_preview_window and self.current_preview_window.isVisible():
+                    QtCore.QMetaObject.invokeMethod(
+                        self.current_preview_window,
+                        'set_loading_state',
+                        QtCore.Qt.ConnectionType.QueuedConnection,
+                        QtCore.Q_ARG(bool, False)
+                    )
+
+        threading.Thread(target=_refinement_worker, daemon=True).start()
+
+    @Slot(list)
+    def _update_current_preview_variations(self, variations):
+        """
+        Slot to update the active preview window with newly generated variations.
+        """
+        if self.current_preview_window and self.current_preview_window.isVisible():
+            self.current_preview_window.update_variations(variations)
 
     def paste_selected_variation(self, text):
         """

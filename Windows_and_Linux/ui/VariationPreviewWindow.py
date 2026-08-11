@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ui.UIUtils import ThemeBackground, colorMode
+from ui.UIUtils import colorMode
 
 
 def generate_word_diff_html(original_text: str, variation_text: str) -> str:
@@ -87,8 +87,8 @@ class VariationCard(QWidget):
         self.original_text = original_text
         self.show_diff = show_diff
         self.setMouseTracking(True)
-        self.setAttribute(QtCore.Qt.WA_Hover, True)
-        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         self.init_ui(index, label_text)
 
     def init_ui(self, index, label_text):
@@ -113,7 +113,7 @@ class VariationCard(QWidget):
         header_layout.addStretch()
 
         apply_btn = QPushButton("Apply & Paste")
-        apply_btn.setCursor(Qt.PointingHandCursor)
+        apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         apply_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {'#2e7d32' if colorMode == 'dark' else '#4CAF50'};
@@ -178,7 +178,7 @@ class VariationCard(QWidget):
         self.text_display.setFixedHeight(min(max(h, 60), 220))
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             self._on_click()
         super().mousePressEvent(event)
 
@@ -193,8 +193,9 @@ class VariationPreviewWindow(QDialog):
     """
     refinement_requested = Signal(str, str)  # (original_text, refinement_instruction)
 
-    def __init__(self, parent=None, original_text="", variations=None):
+    def __init__(self, parent=None, original_text="", variations=None, app=None):
         super().__init__(parent)
+        self.app = app
         self.original_text = original_text
         self.variations = variations or []
         self.selected_variation = None
@@ -204,19 +205,37 @@ class VariationPreviewWindow(QDialog):
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowCloseButtonHint
+            | Qt.WindowType.WindowMinMaxButtonsHint
+        )
         self.setWindowTitle("Writing Tools - Select Variation")
-        self.resize(540, 620)
+
+        saved_size = None
+        if self.app and hasattr(self.app, 'config') and self.app.config:
+            saved_size = self.app.config.get('window_sizes', {}).get('VariationPreviewWindow')
+        
+        if saved_size and len(saved_size) == 2:
+            self.resize(saved_size[0], saved_size[1])
+        else:
+            self.resize(540, 640)
+
+        self.setMinimumSize(460, 500)
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.background = ThemeBackground(
-            self,
-            theme='gradient',
-            is_popup=True,
-            border_radius=12
+        # Plain container widget — ThemeBackground requires a frameless/transparent
+        # window to look correct, so we use a simple styled QWidget here instead.
+        self.background = QWidget(self)
+        self.background.setObjectName("VPWBackground")
+        is_dark = colorMode == 'dark'
+        self.background.setStyleSheet(
+            "QWidget#VPWBackground { "
+            f"background-color: {'#1E1E1E' if is_dark else '#F5F5F5'}; "
+            "}"
         )
         main_layout.addWidget(self.background)
 
@@ -236,11 +255,11 @@ class VariationPreviewWindow(QDialog):
                 font-weight: bold;
             }}
         """)
-        top_bar.addWidget(title_label, 1, Qt.AlignLeft | Qt.AlignVCenter)
+        top_bar.addWidget(title_label, 1, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         # Show Diff Toggle Checkbox
         self.diff_checkbox = QCheckBox("Show Diff")
-        self.diff_checkbox.setCursor(Qt.PointingHandCursor)
+        self.diff_checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
         self.diff_checkbox.setStyleSheet(f"""
             QCheckBox {{
                 color: {'#64B5F6' if colorMode == 'dark' else '#1976D2'};
@@ -249,11 +268,11 @@ class VariationPreviewWindow(QDialog):
             }}
         """)
         self.diff_checkbox.toggled.connect(self._on_diff_toggled)
-        top_bar.addWidget(self.diff_checkbox, 0, Qt.AlignRight | Qt.AlignVCenter)
+        top_bar.addWidget(self.diff_checkbox, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         close_btn = QPushButton("×")
         close_btn.setFixedSize(24, 24)
-        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: transparent;
@@ -268,7 +287,7 @@ class VariationPreviewWindow(QDialog):
             }}
         """)
         close_btn.clicked.connect(self.reject)
-        top_bar.addWidget(close_btn, 0, Qt.AlignRight)
+        top_bar.addWidget(close_btn, 0, Qt.AlignmentFlag.AlignRight)
         content_layout.addLayout(top_bar)
 
         # Original Text Context
@@ -352,7 +371,7 @@ class VariationPreviewWindow(QDialog):
         refine_layout.addWidget(self.refine_input, 1)
 
         self.regen_btn = QPushButton("Regenerate")
-        self.regen_btn.setCursor(Qt.PointingHandCursor)
+        self.regen_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.regen_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {'#0288D1' if colorMode == 'dark' else '#0288D1'};
@@ -384,10 +403,10 @@ class VariationPreviewWindow(QDialog):
                 font-weight: bold;
             }}
         """)
-        footer_layout.addWidget(self.status_label, 1, Qt.AlignLeft | Qt.AlignVCenter)
+        footer_layout.addWidget(self.status_label, 1, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         cancel_btn = QPushButton("Cancel / Dismiss (Esc)")
-        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {'#3A3A3A' if colorMode == 'dark' else '#E0E0E0'};
@@ -402,7 +421,7 @@ class VariationPreviewWindow(QDialog):
             }}
         """)
         cancel_btn.clicked.connect(self.reject)
-        footer_layout.addWidget(cancel_btn, 0, Qt.AlignRight)
+        footer_layout.addWidget(cancel_btn, 0, Qt.AlignmentFlag.AlignRight)
 
         content_layout.addLayout(footer_layout)
 
@@ -410,8 +429,10 @@ class VariationPreviewWindow(QDialog):
         # Clear existing cards
         while self.scroll_layout.count():
             item = self.scroll_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            if item is not None:
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
 
         self.card_widgets.clear()
         for idx, var_info in enumerate(self.variations):
@@ -465,13 +486,19 @@ class VariationPreviewWindow(QDialog):
 
     def keyPressEvent(self, event):
         key = event.key()
-        if key in (Qt.Key_1, Qt.Key_Key_1) and len(self.variations) >= 1:
+        if key == Qt.Key.Key_1 and len(self.variations) >= 1:
             self._on_variation_selected(self.variations[0]["text"])
-        elif key in (Qt.Key_2, Qt.Key_Key_2) and len(self.variations) >= 2:
+        elif key == Qt.Key.Key_2 and len(self.variations) >= 2:
             self._on_variation_selected(self.variations[1]["text"])
-        elif key in (Qt.Key_3, Qt.Key_Key_3) and len(self.variations) >= 3:
+        elif key == Qt.Key.Key_3 and len(self.variations) >= 3:
             self._on_variation_selected(self.variations[2]["text"])
-        elif key == Qt.Key_Escape:
+        elif key == Qt.Key.Key_Escape:
             self.reject()
         else:
             super().keyPressEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'app') and self.app and hasattr(self.app, 'save_window_size'):
+            size = event.size()
+            self.app.save_window_size('VariationPreviewWindow', size.width(), size.height())

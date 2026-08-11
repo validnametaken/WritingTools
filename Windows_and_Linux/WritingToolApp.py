@@ -15,6 +15,7 @@ import ui.OnboardingWindow
 import ui.ResponseWindow
 import ui.SettingsWindow
 import ui.VariationPreviewWindow
+from ui.UIUtils import get_resource_path
 from aiprovider import GeminiProvider, OllamaProvider, OpenAICompatibleProvider, obfuscate_api_key, parse_variations_response
 from pynput import keyboard as pykeyboard
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -141,7 +142,7 @@ class WritingToolApp(QtWidgets.QApplication):
         try:
             translation = gettext.translation(
                 'messages',
-                localedir=os.path.join(os.path.dirname(__file__), 'locales'),
+                localedir=get_resource_path('locales'),
                 languages=[lang]
             )
         except FileNotFoundError:
@@ -230,7 +231,7 @@ class WritingToolApp(QtWidgets.QApplication):
         """
         CURRENT_CONFIG_VERSION = 9
         # Default for new installs and migrating users.
-        NEW_DEFAULT_MODEL = 'gemini-flash-latest'
+        NEW_DEFAULT_MODEL = 'gemini-3.1-flash-lite'
         # v8 -> v9 model mapping. Every retired preset is bumped to the new
         # default so users get the fast Flash-tier experience by default.
         V8_TO_V9_MAP = {
@@ -321,10 +322,10 @@ class WritingToolApp(QtWidgets.QApplication):
         """
         Load the options file.
         """
-        self.options_path = os.path.join(os.path.dirname(sys.argv[0]), 'options.json')
+        self.options_path = get_resource_path('options.json')
         logging.debug(f'Loading options from {self.options_path}')
         if os.path.exists(self.options_path):
-            with open(self.options_path, 'r') as f:
+            with open(self.options_path, 'r', encoding='utf-8') as f:
                 self.options = json.load(f)
                 logging.debug('Options loaded successfully')
         else:
@@ -339,6 +340,71 @@ class WritingToolApp(QtWidgets.QApplication):
             json.dump(config, f, indent=4)
             logging.debug('Config saved successfully')
         self.config = config
+
+    def save_window_size(self, window_name, width, height):
+        """
+        Save window dimensions to config.json.
+        """
+        if not hasattr(self, 'config') or self.config is None:
+            self.config = {}
+        if 'window_sizes' not in self.config:
+            self.config['window_sizes'] = {}
+        if self.config['window_sizes'].get(window_name) != [width, height]:
+            self.config['window_sizes'][window_name] = [width, height]
+            self.save_config(self.config)
+
+    def get_multi_variation_instruction(self, option, system_instruction):
+        """
+        Builds a multi-variation prompt tailored specifically to the given option/command.
+        """
+        option_lower = option.lower().strip()
+        if option_lower in ('proofread', 'rewrite'):
+            style_guidance = (
+                '    {"label": "Option 1: Direct Grammar & Spelling Fix", "text": "First variation..."},\n'
+                '    {"label": "Option 2: Smooth & Natural Rewording", "text": "Second variation..."},\n'
+                '    {"label": "Option 3: Polished & Refined Phrasing", "text": "Third variation..."}\n'
+            )
+            goal_desc = "Provide exactly THREE (3) distinct proofreading/rewording variations for the user's text, focusing on fixing grammar, punctuation, spelling, and sentence phrasing while preserving the core meaning."
+        elif option_lower == 'friendly':
+            style_guidance = (
+                '    {"label": "Option 1: Warm & Casual", "text": "First variation..."},\n'
+                '    {"label": "Option 2: Lighthearted & Friendly", "text": "Second variation..."},\n'
+                '    {"label": "Option 3: Conversational & Approachable", "text": "Third variation..."}\n'
+            )
+            goal_desc = "Provide exactly THREE (3) distinct friendly variations for the user's text with different nuances of warmth, casualness, and friendliness."
+        elif option_lower == 'professional':
+            style_guidance = (
+                '    {"label": "Option 1: Formal & Executive", "text": "First variation..."},\n'
+                '    {"label": "Option 2: Clear Corporate", "text": "Second variation..."},\n'
+                '    {"label": "Option 3: Polished & Business Professional", "text": "Third variation..."}\n'
+            )
+            goal_desc = "Provide exactly THREE (3) distinct professional variations for the user's text, maintaining a formal, clear, and business-appropriate tone."
+        elif option_lower == 'concise':
+            style_guidance = (
+                '    {"label": "Option 1: Ultra-Concise & Direct", "text": "First variation..."},\n'
+                '    {"label": "Option 2: Tight & Essential", "text": "Second variation..."},\n'
+                '    {"label": "Option 3: Balanced Shortened", "text": "Third variation..."}\n'
+            )
+            goal_desc = "Provide exactly THREE (3) distinct concise variations for the user's text, trimming wordiness while preserving key points."
+        else:
+            style_guidance = (
+                '    {"label": "Option 1: Direct & Clear", "text": "First variation..."},\n'
+                '    {"label": "Option 2: Polished & Well-Structured", "text": "Second variation..."},\n'
+                '    {"label": "Option 3: Closest to Original Intent", "text": "Third variation..."}\n'
+            )
+            goal_desc = f"Provide exactly THREE (3) distinct writing variations for the user's text based on the requested command ({option})."
+
+        return (
+            f"{system_instruction}\n\n"
+            f"CRITICAL REQUIREMENT: {goal_desc}\n"
+            "Format your response ONLY as a JSON object with the structure:\n"
+            "{\n"
+            '  "variations": [\n'
+            f"{style_guidance}"
+            "  ]\n"
+            "}\n"
+            "Do not include any additional chat or commentary outside the JSON."
+        )
 
     def show_onboarding(self):
         """
@@ -754,19 +820,7 @@ class WritingToolApp(QtWidgets.QApplication):
                     logging.debug('Invoked set_text on response window')
             else:
                 logging.debug('Getting 3 variations for preview window selection')
-                multi_variation_instruction = (
-                    system_instruction + "\n\n"
-                    "CRITICAL REQUIREMENT: Provide exactly THREE (3) distinct writing variations or rewrites for the user's text based on the requested command.\n"
-                    "Format your response ONLY as a JSON object with the structure:\n"
-                    "{\n"
-                    '  "variations": [\n'
-                    '    {"label": "Option 1: Concise / Direct", "text": "First variation..."},\n'
-                    '    {"label": "Option 2: Professional / Polished", "text": "Second variation..."},\n'
-                    '    {"label": "Option 3: Natural / Casual", "text": "Third variation..."}\n'
-                    "  ]\n"
-                    "}\n"
-                    "Do not include any additional chat or commentary outside the JSON."
-                )
+                multi_variation_instruction = self.get_multi_variation_instruction(option, system_instruction)
                 response = self.current_provider.get_response(multi_variation_instruction, prompt, return_response=True)
                 variations = parse_variations_response(response)
                 logging.debug(f'Parsed {len(variations)} variations for option {option}')
@@ -790,7 +844,8 @@ class WritingToolApp(QtWidgets.QApplication):
             preview_window = ui.VariationPreviewWindow.VariationPreviewWindow(
                 parent=None,
                 original_text=selected_text,
-                variations=variations
+                variations=variations,
+                app=self
             )
             self.current_preview_window = preview_window
             preview_window.refinement_requested.connect(self._handle_refinement_request)
@@ -803,7 +858,6 @@ class WritingToolApp(QtWidgets.QApplication):
             screen_geom = screen.geometry()
 
             preview_window.show()
-            preview_window.adjustSize()
 
             w = preview_window.width()
             h = preview_window.height()
@@ -818,7 +872,7 @@ class WritingToolApp(QtWidgets.QApplication):
             preview_window.move(x, y)
             preview_window.activateWindow()
 
-            if preview_window.exec_() == QtWidgets.QDialog.Accepted and preview_window.selected_variation:
+            if preview_window.exec_() == QtWidgets.QDialog.DialogCode.Accepted and preview_window.selected_variation:
                 logging.debug('User selected a variation from preview window')
                 self.paste_selected_variation(preview_window.selected_variation)
             else:
@@ -844,9 +898,9 @@ class WritingToolApp(QtWidgets.QApplication):
                     "Format your output ONLY as a JSON object with the structure:\n"
                     "{\n"
                     '  "variations": [\n'
-                    '    {"label": "Option 1: Concise / Direct", "text": "First variation..."},\n'
-                    '    {"label": "Option 2: Professional / Polished", "text": "Second variation..."},\n'
-                    '    {"label": "Option 3: Natural / Casual", "text": "Third variation..."}\n'
+                    '    {"label": "Option 1: Refined Variation 1", "text": "First variation..."},\n'
+                    '    {"label": "Option 2: Refined Variation 2", "text": "Second variation..."},\n'
+                    '    {"label": "Option 3: Refined Variation 3", "text": "Third variation..."}\n'
                     "  ]\n"
                     "}\n"
                     "Do not include any extra chat or commentary outside the JSON."
@@ -919,6 +973,10 @@ class WritingToolApp(QtWidgets.QApplication):
         Show the response in a new window instead of pasting it.
         """
         response_window = ui.ResponseWindow.ResponseWindow(self, f"{option} Result")
+        saved_size = self.config.get('window_sizes', {}).get('ResponseWindow') if self.config else None
+        if saved_size and len(saved_size) == 2:
+            response_window.resize(saved_size[0], saved_size[1])
+            response_window._size_initialized = True
         response_window.selected_text = text  # Store the text for regeneration
         response_window.show()
         return response_window
@@ -992,13 +1050,15 @@ class WritingToolApp(QtWidgets.QApplication):
             return
 
         logging.debug('Creating system tray icon')
-        icon_path = os.path.join(os.path.dirname(sys.argv[0]), 'icons', 'app_icon.png')
+        icon_path = get_resource_path(os.path.join('icons', 'app_icon.png'))
         if not os.path.exists(icon_path):
-            logging.warning(f'Tray icon not found at {icon_path}')
-            # Use a default icon if not found
-            self.tray_icon = QtWidgets.QSystemTrayIcon(self)
-        else:
+            icon_path = get_resource_path(os.path.join('icons', 'app_icon.ico'))
+
+        if os.path.exists(icon_path):
             self.tray_icon = QtWidgets.QSystemTrayIcon(QtGui.QIcon(icon_path), self)
+        else:
+            logging.warning(f'Tray icon not found at {icon_path}')
+            self.tray_icon = QtWidgets.QSystemTrayIcon(self)
         # Set the tooltip (hover name) for the tray icon
         self.tray_icon.setToolTip("WritingTools")
         self.tray_menu = QtWidgets.QMenu()
@@ -1052,13 +1112,13 @@ class WritingToolApp(QtWidgets.QApplication):
         if is_dark_mode:
             logging.debug('Tray icon dark')
             # Dark mode colors
-            palette.setColor(QtGui.QPalette.Window, QtGui.QColor("#2d2d2d"))  # Dark background
-            palette.setColor(QtGui.QPalette.WindowText, QtGui.QColor("#ffffff"))  # White text
+            palette.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor("#2d2d2d"))  # Dark background
+            palette.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("#ffffff"))  # White text
         else:
             logging.debug('Tray icon light')
             # Light mode colors
-            palette.setColor(QtGui.QPalette.Window, QtGui.QColor("#ffffff"))  # Light background
-            palette.setColor(QtGui.QPalette.WindowText, QtGui.QColor("#000000"))  # Black text
+            palette.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor("#ffffff"))  # Light background
+            palette.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("#000000"))  # Black text
 
         menu.setPalette(palette)
 

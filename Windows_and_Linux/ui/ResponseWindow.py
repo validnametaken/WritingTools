@@ -7,7 +7,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import QScrollArea
 
-from ui.UIUtils import UIUtils, colorMode
+from ui.UIUtils import UIUtils, colorMode, get_resource_path
 
 _ = lambda x: x
 
@@ -107,7 +107,7 @@ class MarkdownTextBrowser(QtWidgets.QTextBrowser):
             while parent and not isinstance(parent, ResponseWindow):
                 parent = parent.parent()
                 
-            if parent:
+            if isinstance(parent, ResponseWindow):
                 if delta > 0:
                     parent.zoom_all_messages('in')
                 else:
@@ -115,8 +115,9 @@ class MarkdownTextBrowser(QtWidgets.QTextBrowser):
                 event.accept()
         else:
             # Pass wheel events to parent for scrolling
-            if self.parent():
-                self.parent().wheelEvent(event)
+            p = self.parent()
+            if isinstance(p, QtWidgets.QWidget):
+                p.wheelEvent(event)
             
     def zoom_in(self):
         old_factor = self.zoom_factor
@@ -159,7 +160,7 @@ class ChatContentScrollArea(QScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.content_widget = None
-        self.layout = None
+        self.chat_layout = None
         self.setup_ui()
         
     def setup_ui(self):
@@ -176,10 +177,10 @@ class ChatContentScrollArea(QScrollArea):
         self.setWidget(self.content_widget)
         
         # Main layout with improved spacing
-        self.layout = QtWidgets.QVBoxLayout(self.content_widget)
-        self.layout.setSpacing(8)  # Reduced spacing between messages
-        self.layout.setContentsMargins(15, 15, 15, 15)  # Adjusted margins
-        self.layout.addStretch()
+        self.chat_layout = QtWidgets.QVBoxLayout(self.content_widget)
+        self.chat_layout.setSpacing(8)  # Reduced spacing between messages
+        self.chat_layout.setContentsMargins(15, 15, 15, 15)  # Adjusted margins
+        self.chat_layout.addStretch()
         
         # Enhanced scroll area styling
         self.setStyleSheet("""
@@ -208,7 +209,8 @@ class ChatContentScrollArea(QScrollArea):
 
     def add_message(self, text, is_user=False):
         # Remove bottom stretch
-        self.layout.takeAt(self.layout.count() - 1)
+        if self.chat_layout:
+            self.chat_layout.takeAt(self.chat_layout.count() - 1)
         
         # Create message container with improved width
         msg_container = QtWidgets.QWidget()
@@ -236,11 +238,13 @@ class ChatContentScrollArea(QScrollArea):
         
         msg_layout.addWidget(text_display)
         
-        self.layout.addWidget(msg_container)
-        self.layout.addStretch()
+        if self.chat_layout:
+            self.chat_layout.addWidget(msg_container)
+            self.chat_layout.addStretch()
         
-        if hasattr(self.parent(), 'current_text_display'):
-            self.parent().current_text_display = text_display
+        parent_w = self.parent()
+        if parent_w and hasattr(parent_w, 'current_text_display'):
+            setattr(parent_w, 'current_text_display', text_display)
             
         QtCore.QTimer.singleShot(50, self.post_message_updates)
         
@@ -249,30 +253,35 @@ class ChatContentScrollArea(QScrollArea):
     def post_message_updates(self):
         """Handle updates after adding a message with proper timing"""
         self.scroll_to_bottom()
-        if isinstance(self.parent(), ResponseWindow):
-            self.parent()._adjust_window_height()
+        parent_w = self.parent()
+        if isinstance(parent_w, ResponseWindow):
+            parent_w._adjust_window_height()
 
     def update_content_height(self):
         """Recalculate total content height with improved spacing calculation"""
         total_height = 0
-        
+        if self.chat_layout is None:
+            return
+
         # Calculate height of all messages
-        for i in range(self.layout.count() - 1):  # Skip stretch item
-            item = self.layout.itemAt(i)
+        for i in range(self.chat_layout.count() - 1):  # Skip stretch item
+            item = self.chat_layout.itemAt(i)
             if item and item.widget():
                 widget_height = item.widget().sizeHint().height()
                 total_height += widget_height
         
         # Add spacing between messages and margins
-        total_height += (self.layout.spacing() * (self.layout.count() - 2))  # Message spacing
-        total_height += self.layout.contentsMargins().top() + self.layout.contentsMargins().bottom()
+        total_height += (self.chat_layout.spacing() * (self.chat_layout.count() - 2))  # Message spacing
+        total_height += self.chat_layout.contentsMargins().top() + self.chat_layout.contentsMargins().bottom()
         
         # Set minimum height with some padding
-        self.content_widget.setMinimumHeight(total_height + 10)
+        if self.content_widget:
+            self.content_widget.setMinimumHeight(total_height + 10)
         
         # Update window height if needed
-        if isinstance(self.parent(), ResponseWindow):
-            self.parent()._adjust_window_height()
+        parent_w = self.parent()
+        if isinstance(parent_w, ResponseWindow):
+            parent_w._adjust_window_height()
 
     def scroll_to_bottom(self):
         """Smooth scroll to bottom of content"""
@@ -282,23 +291,29 @@ class ChatContentScrollArea(QScrollArea):
     def resizeEvent(self, event):
         """Handle resize events with improved width calculations"""
         super().resizeEvent(event)
-        
+        if self.chat_layout is None:
+            return
+
         # Update width for all message displays
         available_width = self.width() - 40  # Account for margins
-        for i in range(self.layout.count() - 1):  # Skip stretch item
-            item = self.layout.itemAt(i)
+        for i in range(self.chat_layout.count() - 1):  # Skip stretch item
+            item = self.chat_layout.itemAt(i)
             if item and item.widget():
                 container = item.widget()
-                text_display = container.layout().itemAt(0).widget()
-                if isinstance(text_display, MarkdownTextBrowser):
-                    # Recalculate text width and height
-                    text_display.document().setTextWidth(available_width)
-                    doc_size = text_display.document().size()
-                    text_display.setMinimumHeight(int(doc_size.height() + 20))  # Reduced padding
+                cont_layout = container.layout()
+                if cont_layout:
+                    sub_item = cont_layout.itemAt(0)
+                    if sub_item and sub_item.widget():
+                        text_display = sub_item.widget()
+                        if isinstance(text_display, MarkdownTextBrowser):
+                            text_display.document().setTextWidth(available_width)
+                            doc_size = text_display.document().size()
+                            text_display.setMinimumHeight(int(doc_size.height() + 20))  # Reduced padding
 
 
 class ResponseWindow(QtWidgets.QWidget):
     """Enhanced response window with improved sizing and zoom handling"""
+    background: QtWidgets.QWidget | None = None
     
     def __init__(self, app, title=_("Response"), parent=None):
         super().__init__(parent)
@@ -312,6 +327,7 @@ class ResponseWindow(QtWidgets.QWidget):
         self.loading_container = None
         self.chat_area = None
         self.chat_history = []
+        self.background = None
 
         # Setup thinking animation with full range of dots
         self.thinking_timer = QtCore.QTimer(self)
@@ -325,10 +341,18 @@ class ResponseWindow(QtWidgets.QWidget):
         self.app.followup_response_signal.connect(self.handle_followup_response)
         logging.debug('Response signals connected')
 
-        # Set initial size for "Thinking..." state
-        initial_width = 500
-        initial_height = 250
-        self.resize(initial_width, initial_height)
+        # Set initial size or restore saved size
+        saved_size = None
+        if hasattr(self.app, 'config') and self.app.config:
+            saved_size = self.app.config.get('window_sizes', {}).get('ResponseWindow')
+
+        if saved_size and len(saved_size) == 2:
+            self.resize(saved_size[0], saved_size[1])
+            self._size_initialized = True
+        else:
+            initial_width = 500
+            initial_height = 250
+            self.resize(initial_width, initial_height)
                 
     def init_ui(self):
         # Window setup with enhanced flags
@@ -340,6 +364,7 @@ class ResponseWindow(QtWidgets.QWidget):
         
         # Main layout setup
         UIUtils.setup_window_and_layout(self)
+        assert self.background is not None
         content_layout = QtWidgets.QVBoxLayout(self.background)
         content_layout.setContentsMargins(20, 20, 20, 20)
         content_layout.setSpacing(10)
@@ -371,7 +396,8 @@ class ResponseWindow(QtWidgets.QWidget):
             
         for icon, tooltip, action in zoom_controls:
             btn = QtWidgets.QPushButton()
-            btn.setIcon(QtGui.QIcon(os.path.join(os.path.dirname(sys.argv[0]), 'icons', icon + ('_dark' if colorMode == 'dark' else '_light') + '.png')))
+            icon_file = get_resource_path(os.path.join('icons', icon + ('_dark' if colorMode == 'dark' else '_light') + '.png'))
+            btn.setIcon(QtGui.QIcon(icon_file))
             btn.setStyleSheet(self.get_button_style())
             btn.setToolTip(tooltip)
             btn.clicked.connect(action)
@@ -447,7 +473,8 @@ class ResponseWindow(QtWidgets.QWidget):
         bottom_bar.addWidget(self.input_field)
         
         send_button = QtWidgets.QPushButton()
-        send_button.setIcon(QtGui.QIcon(os.path.join(os.path.dirname(sys.argv[0]), 'icons', 'send' + ('_dark' if colorMode == 'dark' else '_light') + '.png')))
+        send_icon_file = get_resource_path(os.path.join('icons', 'send' + ('_dark' if colorMode == 'dark' else '_light') + '.png'))
+        send_button.setIcon(QtGui.QIcon(send_icon_file))
         send_button.setStyleSheet(f"""
             QPushButton {{
                 background-color: {'#2e7d32' if colorMode == 'dark' else '#4CAF50'};
@@ -509,9 +536,9 @@ class ResponseWindow(QtWidgets.QWidget):
         self.thinking_dots_state = (self.thinking_dots_state + 1) % len(self.thinking_dots)
         dots = self.thinking_dots[self.thinking_dots_state]
         
-        if self.loading_label.isVisible():
+        if self.loading_label and self.loading_label.isVisible():
             self.loading_label.setText(_("Thinking")+f"{dots}")
-        else:
+        elif self.input_field:
             self.input_field.setPlaceholderText(_("Thinking")+f"{dots}")
     
     def start_thinking_animation(self, initial=False):
@@ -519,44 +546,58 @@ class ResponseWindow(QtWidgets.QWidget):
         self.thinking_dots_state = 0
         
         if initial:
-            self.loading_label.setText(_("Thinking"))
-            self.loading_label.setVisible(True)
-            self.loading_container.setVisible(True)
+            if self.loading_label:
+                self.loading_label.setText(_("Thinking"))
+                self.loading_label.setVisible(True)
+            if self.loading_container:
+                self.loading_container.setVisible(True)
         else:
-            self.input_field.setPlaceholderText(_("Thinking"))
-            self.loading_container.setVisible(False)
+            if self.input_field:
+                self.input_field.setPlaceholderText(_("Thinking"))
+            if self.loading_container:
+                self.loading_container.setVisible(False)
             
         self.thinking_timer.start()
 
     def stop_thinking_animation(self):
         """Stop the thinking animation"""
         self.thinking_timer.stop()
-        self.loading_container.hide()
-        self.loading_label.hide()
-        self.input_field.setPlaceholderText(_("Ask a follow-up question"))
-        self.input_field.setEnabled(True)
+        if self.loading_container:
+            self.loading_container.hide()
+        if self.loading_label:
+            self.loading_label.hide()
+        if self.input_field:
+            self.input_field.setPlaceholderText(_("Ask a follow-up question"))
+            self.input_field.setEnabled(True)
         
         # Force layout update
-        if self.layout():
-            self.layout().invalidate()
-            self.layout().activate()
+        main_layout = self.layout()
+        if main_layout:
+            main_layout.invalidate()
+            main_layout.activate()
 
     def zoom_all_messages(self, action='in'):
         """Apply zoom action to all messages in the chat"""
-        for i in range(self.chat_area.layout.count() - 1):  # Skip stretch item
-            item = self.chat_area.layout.itemAt(i)
-            if item and item.widget():
-                text_display = item.widget().layout().itemAt(0).widget()
-                if isinstance(text_display, MarkdownTextBrowser):
-                    if action == 'in':
-                        text_display.zoom_in()
-                    elif action == 'out':
-                        text_display.zoom_out()
-                    else:  # reset
-                        text_display.reset_zoom()
+        if self.chat_area and self.chat_area.chat_layout:
+            for i in range(self.chat_area.chat_layout.count() - 1):  # Skip stretch item
+                item = self.chat_area.chat_layout.itemAt(i)
+                if item and item.widget():
+                    cont_layout = item.widget().layout()
+                    if cont_layout:
+                        sub_item = cont_layout.itemAt(0)
+                        if sub_item and sub_item.widget():
+                            text_display = sub_item.widget()
+                            if isinstance(text_display, MarkdownTextBrowser):
+                                if action == 'in':
+                                    text_display.zoom_in()
+                                elif action == 'out':
+                                    text_display.zoom_out()
+                                else:  # reset
+                                    text_display.reset_zoom()
         
         # Update layout after zooming
-        self.chat_area.update_content_height()
+        if self.chat_area:
+            self.chat_area.update_content_height()
         
     def _adjust_window_height(self):
         """Calculate and set the ideal window height"""
@@ -566,15 +607,19 @@ class ResponseWindow(QtWidgets.QWidget):
                 
         try:
             # Get content widget height
-            content_height = self.chat_area.content_widget.sizeHint().height()
+            content_height = 400
+            if self.chat_area and self.chat_area.content_widget:
+                content_height = self.chat_area.content_widget.sizeHint().height()
                 
             # Calculate other UI elements height
+            main_layout = self.layout()
+            top_m = main_layout.contentsMargins().top() if main_layout else 20
+            bot_m = main_layout.contentsMargins().bottom() if main_layout else 20
+            sp = main_layout.spacing() if main_layout else 10
+            inp_h = self.input_field.height() if self.input_field else 40
+
             ui_elements_height = (
-                self.layout().contentsMargins().top() +
-                self.layout().contentsMargins().bottom() +
-                self.input_field.height() +
-                self.layout().spacing() * 5 +
-                200  # Increased from 185 for taller default height
+                top_m + bot_m + inp_h + sp * 5 + 200
             )
                 
             # Get screen constraints
@@ -583,7 +628,7 @@ class ResponseWindow(QtWidgets.QWidget):
                 screen = QtWidgets.QApplication.primaryScreen()
                 
             # Calculate maximum available height (85% of screen)
-            max_height = int(screen.geometry().height() * 0.85)
+            max_height = int(screen.geometry().height() * 0.85) if screen else 800
                 
             # Calculate desired height to show more content initially
             desired_content_height = int(content_height * 0.85)  # Show 85% of content
@@ -603,9 +648,10 @@ class ResponseWindow(QtWidgets.QWidget):
                 
             # Center on screen
             frame_geometry = self.frameGeometry()
-            screen_center = screen.geometry().center()
-            frame_geometry.moveCenter(screen_center)
-            self.move(frame_geometry.topLeft())
+            if screen:
+                screen_center = screen.geometry().center()
+                frame_geometry.moveCenter(screen_center)
+                self.move(frame_geometry.topLeft())
                 
             # Mark size as initialized
             self._size_initialized = True
@@ -628,12 +674,13 @@ class ResponseWindow(QtWidgets.QWidget):
         ]
         
         self.stop_thinking_animation()
-        text_display = self.chat_area.add_message(text)
-        
-        # Update zoom state
-        if hasattr(self.app.config, 'response_window_zoom'):
-            text_display.zoom_factor = self.app.config['response_window_zoom']
-            text_display._apply_zoom()
+        if self.chat_area:
+            text_display = self.chat_area.add_message(text)
+            
+            # Update zoom state
+            if hasattr(self.app, 'config') and isinstance(self.app.config, dict) and 'response_window_zoom' in self.app.config:
+                text_display.zoom_factor = self.app.config['response_window_zoom']
+                text_display._apply_zoom()
         
         QtCore.QTimer.singleShot(100, self._adjust_window_height)
         
@@ -641,13 +688,15 @@ class ResponseWindow(QtWidgets.QWidget):
     def handle_followup_response(self, response_text):
         """Handle the follow-up response from the AI with improved layout handling"""
         if response_text:
-            self.loading_label.setVisible(False)
-            text_display = self.chat_area.add_message(response_text)
-            
-            # Maintain consistent zoom level
-            if hasattr(self, 'current_text_display'):
-                text_display.zoom_factor = self.current_text_display.zoom_factor
-                text_display._apply_zoom()
+            if self.loading_label:
+                self.loading_label.setVisible(False)
+            if self.chat_area:
+                text_display = self.chat_area.add_message(response_text)
+                
+                # Maintain consistent zoom level
+                if hasattr(self, 'current_text_display'):
+                    text_display.zoom_factor = self.current_text_display.zoom_factor
+                    text_display._apply_zoom()
             
             if len(self.chat_history) > 0 and self.chat_history[-1]["role"] != "assistant":
                 self.chat_history.append({
@@ -656,13 +705,16 @@ class ResponseWindow(QtWidgets.QWidget):
                 })
         
         self.stop_thinking_animation()
-        self.input_field.setEnabled(True)
+        if self.input_field:
+            self.input_field.setEnabled(True)
         
         # Update window height
         QtCore.QTimer.singleShot(100, self._adjust_window_height)
         
     def send_message(self):
         """Send a new message/question"""
+        if not self.input_field:
+            return
         message = self.input_field.text().strip()
         if not message:
             return
@@ -671,10 +723,11 @@ class ResponseWindow(QtWidgets.QWidget):
         self.input_field.clear()
         
         # Add user message and maintain zoom level
-        text_display = self.chat_area.add_message(message, is_user=True)
-        if hasattr(self, 'current_text_display'):
-            text_display.zoom_factor = self.current_text_display.zoom_factor
-            text_display._apply_zoom()
+        if self.chat_area:
+            text_display = self.chat_area.add_message(message, is_user=True)
+            if hasattr(self, 'current_text_display'):
+                text_display.zoom_factor = self.current_text_display.zoom_factor
+                text_display._apply_zoom()
         
         self.chat_history.append({"role": "user", "content": message})
         self.start_thinking_animation()
@@ -691,6 +744,12 @@ class ResponseWindow(QtWidgets.QWidget):
                 
         QtWidgets.QApplication.clipboard().setText(markdown)
         
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'app') and self.app and hasattr(self.app, 'save_window_size'):
+            size = event.size()
+            self.app.save_window_size('ResponseWindow', size.width(), size.height())
+
     def closeEvent(self, event):
         """Handle window close event"""
         # Save zoom factor to main config

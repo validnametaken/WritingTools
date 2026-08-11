@@ -37,7 +37,7 @@ import logging
 import re
 import webbrowser
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Sequence, Any
 
 # External libraries
 from google import genai
@@ -114,14 +114,14 @@ def parse_variations_response(raw_text: str) -> list:
                             if txt.strip():
                                 variations.append({"label": lbl, "text": txt.strip()})
                     else:
-                        default_labels = ["Option 1: Concise / Direct", "Option 2: Professional / Polished", "Option 3: Natural / Casual"]
+                        default_labels = ["Option 1", "Option 2", "Option 3"]
                         for idx, (k, v) in enumerate(data.items()):
                             lbl = default_labels[idx] if idx < len(default_labels) else k
                             if isinstance(v, str) and v.strip():
                                 variations.append({"label": lbl, "text": v.strip()})
 
                 elif isinstance(data, list):
-                    default_labels = ["Option 1: Concise / Direct", "Option 2: Professional / Polished", "Option 3: Natural / Casual"]
+                    default_labels = ["Option 1", "Option 2", "Option 3"]
                     for idx, item in enumerate(data):
                         lbl = default_labels[idx] if idx < len(default_labels) else f"Option {idx + 1}"
                         if isinstance(item, str) and item.strip():
@@ -154,7 +154,7 @@ def parse_variations_response(raw_text: str) -> list:
     # 3. Double newline split fallback if we have distinct blocks
     blocks = [b.strip() for b in cleaned.split("\n\n") if b.strip()]
     if len(blocks) == 3:
-        labels = ["Option 1: Concise / Direct", "Option 2: Professional / Polished", "Option 3: Natural / Casual"]
+        labels = ["Option 1: Concise / Direct", "Option 2: Professional / Polished", "Option 3: Closest to Original"]
         return [{"label": labels[i], "text": blocks[i]} for i in range(3)]
 
     # 4. Final fallback: single response
@@ -166,24 +166,24 @@ class AIProviderSetting(ABC):
     """
     Abstract base class for a provider setting (e.g., API key, model selection).
     """
-    def __init__(self, name: str, display_name: str = None, default_value: str = None, description: str = None):
+    def __init__(self, name: str, display_name: str | None = None, default_value: str | None = None, description: str | None = None):
         self.name = name
         self.display_name = display_name if display_name else name
         self.default_value = default_value if default_value else ""
         self.description = description if description else ""
 
     @abstractmethod
-    def render_to_layout(self, layout: QVBoxLayout):
+    def render_to_layout(self, layout: QVBoxLayout) -> None:
         """Render the setting widget(s) into the provided layout."""
         pass
 
     @abstractmethod
-    def set_value(self, value):
+    def set_value(self, value: str) -> None:
         """Set the internal value from configuration."""
         pass
 
     @abstractmethod
-    def get_value(self):
+    def get_value(self) -> str:
         """Return the current value from the widget."""
         pass
 
@@ -192,7 +192,7 @@ class TextSetting(AIProviderSetting):
     """
     A text-based setting (for API keys, URLs, etc.).
     """
-    def __init__(self, name: str, display_name: str = None, default_value: str = None, description: str = None):
+    def __init__(self, name: str, display_name: str | None = None, default_value: str | None = None, description: str | None = None):
         super().__init__(name, display_name, default_value, description)
         self.internal_value = default_value
         self.input = None
@@ -218,7 +218,9 @@ class TextSetting(AIProviderSetting):
         self.internal_value = value
 
     def get_value(self):
-        return self.input.text()
+        if self.input:
+            return self.input.text()
+        return self.internal_value or ""
 
 
 class DropdownSetting(AIProviderSetting):
@@ -232,8 +234,8 @@ class DropdownSetting(AIProviderSetting):
     # Sentinel value used internally to identify the "Custom" dropdown option
     _CUSTOM_SENTINEL = "__custom__"
 
-    def __init__(self, name: str, display_name: str = None, default_value: str = None,
-                 description: str = None, options: list = None, allow_custom: bool = False,
+    def __init__(self, name: str, display_name: str | None = None, default_value: str | None = None,
+                 description: str | None = None, options: list | None = None, allow_custom: bool = False,
                  custom_placeholder: str = "Enter custom value"):
         super().__init__(name, display_name, default_value, description)
         self.options = options if options else []
@@ -314,7 +316,7 @@ class DropdownSetting(AIProviderSetting):
 
     def _update_custom_input_visibility(self):
         """Show or hide the custom input based on dropdown selection."""
-        if self.custom_input_container:
+        if self.custom_input_container and self.dropdown:
             is_custom = self.dropdown.currentData() == self._CUSTOM_SENTINEL
             self.custom_input_container.setVisible(is_custom)
             # Focus the input when switching to Custom for better UX
@@ -326,9 +328,9 @@ class DropdownSetting(AIProviderSetting):
 
     def get_value(self):
         # If "Custom" is selected, return the text input value (stripped of whitespace)
-        if self.allow_custom and self.dropdown.currentData() == self._CUSTOM_SENTINEL:
-            return self.custom_input.text().strip()
-        return self.dropdown.currentData()
+        if self.allow_custom and self.dropdown and self.dropdown.currentData() == self._CUSTOM_SENTINEL:
+            return self.custom_input.text().strip() if self.custom_input else ""
+        return self.dropdown.currentData() if self.dropdown else (self.internal_value or "")
 
 
 class AIProvider(ABC):
@@ -341,11 +343,11 @@ class AIProvider(ABC):
       • before_load() to cleanup any existing client
       • cancel() to cancel an ongoing request
     """
-    def __init__(self, app, provider_name: str, settings: List[AIProviderSetting],
+    def __init__(self, app, provider_name: str, settings: Sequence[AIProviderSetting],
                  description: str = "An unfinished AI provider!",
                  logo: str = "generic",
                  button_text: str = "Go to URL",
-                 button_action: callable = None):
+                 button_action: Any = None):
         self.provider_name = provider_name
         self.settings = settings
         self.app = app
@@ -408,19 +410,9 @@ class AIProvider(ABC):
 class GeminiProvider(AIProvider):
     """
     Provider for Google's Gemini API (using the new unified `google-genai` SDK).
-
-    Uses `client.models.generate_content()` for single-shot generation. The same
-    method is used for follow-up chat too — the entire conversation history is
-    passed via `contents` as a list of `Content` objects, so we don't need the
-    SDK's chat session abstraction.
-
-    System instruction is passed via `GenerateContentConfig.system_instruction`
-    (not concatenated into `contents`, as the legacy SDK required).
-
-    Thinking is disabled (set to "minimal", the lowest level the API exposes)
-    on Gemini 3-family models. Gemma models don't have a thinking process, so
-    `thinking_config` is omitted for them — passing it could otherwise error.
     """
+    api_key: str = ""
+    model_name: str = "gemini-3.1-flash-lite"
 
     # Disable safety filtering across all categories (best-effort; some models
     # may still soft-refuse). Defined once, reused per request.
@@ -440,17 +432,11 @@ class GeminiProvider(AIProvider):
             DropdownSetting(
                 name="model_name",
                 display_name="Model",
-                default_value="gemini-flash-latest",
+                default_value="gemini-3.1-flash-lite",
                 description="Select Gemini model to use",
                 options=[
-                    # `gemini-flash-latest` is a Google-managed alias that currently
-                    # points to Gemini 3 Flash Preview — fast (~1–2s) and high
-                    # quality. Capped at 20 free requests/day per the model's free
-                    # tier.
-                    ("⭐ Gemini Flash Latest (very fast | only 20 free uses/day)", "gemini-flash-latest"),
-                    # Gemma 4 models are unlimited on the free tier but noticeably
-                    # slower (8–15s typical) since they run on different
-                    # infrastructure.
+                    ("⭐ Gemini 3.1 Flash-Lite (Recommended | fast & high limits)", "gemini-3.1-flash-lite"),
+                    ("Gemini Flash Latest (very fast | 20 free uses/day)", "gemini-flash-latest"),
                     ("Gemma 4 31B (slow | unlimited free use)", "gemma-4-31b-it"),
                     ("Gemma 4 26B A4B (slow | unlimited free use)", "gemma-4-26b-a4b-it"),
                 ],
@@ -467,44 +453,18 @@ class GeminiProvider(AIProvider):
             lambda: webbrowser.open("https://aistudio.google.com/app/apikey"))
 
     def _build_config(self, system_instruction: str) -> "genai_types.GenerateContentConfig":
-        """
-        Build a per-call GenerateContentConfig.
-
-        We don't override temperature: Gemini 3 docs explicitly recommend leaving
-        it at the default of 1.0 (lower values can cause looping / degraded
-        output on reasoning-heavy tasks). The old SDK code set it to 0.5; we drop
-        that override here.
-        """
-        # Thinking is disabled across the board for Writing Tools (latency matters
-        # more than reasoning depth for proofread/rewrite/summary flows).
-        #
-        # • Gemma 4 *is* capable of thinking, but is off by default. Per
-        #   https://ai.google.dev/gemma/docs/core/gemma_on_gemini_api#thinking,
-        #   thinking on Gemma 4 is binary and "you enable it in the API by setting
-        #   the thinking level to 'high'". So omitting thinking_config keeps
-        #   Gemma 4 in its default-off state.
-        # • Gemini 3 Flash / Flash-Lite cannot fully disable thinking. The
-        #   lowest exposed level is "minimal", which the docs say "matches the
-        #   'no thinking' setting for most queries".
-        is_gemma = "gemma" in (self.model_name or "").lower()
+        is_gemma = "gemma" in (getattr(self, 'model_name', '') or "").lower()
         kwargs = {
             "system_instruction": system_instruction,
             "safety_settings": self._SAFETY_SETTINGS,
             "max_output_tokens": 1000,
         }
         if not is_gemma:
-            kwargs["thinking_config"] = genai_types.ThinkingConfig(thinking_level="minimal")
+            kwargs["thinking_config"] = genai_types.ThinkingConfig(thinking_level="minimal")  # type: ignore
         return genai_types.GenerateContentConfig(**kwargs)
 
     @staticmethod
     def _messages_to_contents(messages: list) -> list:
-        """
-        Convert OpenAI-style chat history into google-genai `Content` objects.
-
-        Maps roles: assistant → "model", everything else → "user". Any "system"
-        entries are dropped because Gemini takes the system instruction via the
-        config object instead of as an in-history message.
-        """
         contents = []
         for m in messages:
             role = m.get("role")
@@ -516,17 +476,9 @@ class GeminiProvider(AIProvider):
         return contents
 
     def get_response(self, system_instruction: str, prompt, return_response: bool = False) -> str:
-        """
-        Generate content using Gemini.
-
-        `prompt` may be either a plain string (the typical inline-tool flow) or a
-        list of OpenAI-style message dicts (the follow-up chat flow). In both
-        cases we make a single-shot non-streaming request.
-
-        Returns the response text when `return_response` is True; otherwise emits
-        it via `output_ready_signal` for inline replacement.
-        """
         self.close_requested = False
+        if not self.client:
+            return ""
 
         try:
             contents = self._messages_to_contents(prompt) if isinstance(prompt, list) else prompt
@@ -552,24 +504,16 @@ class GeminiProvider(AIProvider):
             self.close_requested = False
 
     def load_config(self, config: dict):
-        """
-        Load configuration, deobfuscating the API key if needed.
-        """
-        # Deobfuscate API key before loading
         if 'api_key' in config:
-            config = config.copy()  # Don't modify the original
+            config = config.copy()
             config['api_key'] = deobfuscate_api_key(config['api_key'])
         super().load_config(config)
 
     def save_config(self):
-        """
-        Save configuration, obfuscating the API key for storage.
-        """
         config = {}
         for setting in self.settings:
             value = setting.get_value()
-            # Obfuscate API key before saving
-            if setting.name == 'api_key':
+            if setting.name == 'api_key' and isinstance(value, str):
                 value = obfuscate_api_key(value)
             config[setting.name] = value
         self.app.config["providers"][self.provider_name] = config
@@ -593,10 +537,13 @@ class GeminiProvider(AIProvider):
 class OpenAICompatibleProvider(AIProvider):
     """
     Provider for OpenAI-compatible APIs.
-    
-    Uses self.client.chat.completions.create() to obtain a response.
-    Streaming is fully removed.
     """
+    api_key: str = ""
+    api_base: str = ""
+    api_organisation: str = ""
+    api_project: str = ""
+    api_model: str = ""
+
     def __init__(self, app):
         self.close_requested = None
         self.client = None
@@ -614,15 +561,9 @@ class OpenAICompatibleProvider(AIProvider):
             "openai", "Get OpenAI API Key", lambda: webbrowser.open("https://platform.openai.com/account/api-keys"))
 
     def get_response(self, system_instruction: str, prompt: str | list, return_response: bool = False) -> str:
-        """
-        Send a chat request to the OpenAI-compatible API.
-        
-        Always performs a non-streaming request.
-        If prompt is not a list, builds a simple two-message conversation.
-        Returns the response text if return_response is True,
-        otherwise emits it via output_ready_signal.
-        """
         self.close_requested = False
+        if not self.client:
+            return ""
 
         if isinstance(prompt, list):
             messages = prompt
@@ -639,7 +580,7 @@ class OpenAICompatibleProvider(AIProvider):
                 temperature=0.5,
                 stream=False
             )
-            response_text = response.choices[0].message.content.strip()
+            response_text = (response.choices[0].message.content or "").strip()
 
             if not return_response and not hasattr(self.app, 'current_response_window'):
                 self.app.output_ready_signal.emit(response_text)
@@ -675,10 +616,11 @@ class OpenAICompatibleProvider(AIProvider):
 class OllamaProvider(AIProvider):
     """
     Provider for connecting to an Ollama server.
-    
-    Uses the /chat endpoint of the Ollama server to generate a response.
-    Streaming is not used.
     """
+    api_base: str = ""
+    api_model: str = ""
+    keep_alive: str = "5"
+
     def __init__(self, app):
         self.close_requested = None
         self.client = None
@@ -694,14 +636,9 @@ class OllamaProvider(AIProvider):
             lambda: webbrowser.open("https://github.com/theJayTea/WritingTools?tab=readme-ov-file#-optional-ollama-local-llm-instructions-for-windows-v7-onwards"))
 
     def get_response(self, system_instruction: str, prompt: str | list, return_response: bool = False) -> str:
-        """
-        Send a chat request to the Ollama server.
-        
-        Always performs a non-streaming request.
-        Returns the response text if return_response is True,
-        otherwise emits it via output_ready_signal.
-        """
         self.close_requested = False
+        if not self.client:
+            return ""
 
         if isinstance(prompt, list):
             messages = prompt

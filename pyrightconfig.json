@@ -1,0 +1,12 @@
+{
+    "pythonVersion": "3.13",
+    "pythonPlatform": "Windows",
+    "pythonInterpreterPath": "C:/Python313/python.exe",
+    "extraPaths": [
+        "C:/Users/Andy/AppData/Roaming/Python/Python313/site-packages",
+        "Windows_and_Linux"
+    ],
+    "exclude": [
+        "macOS/**"
+    ]
+}

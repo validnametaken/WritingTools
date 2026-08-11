@@ -2,6 +2,9 @@ import os
 import subprocess
 import sys
 
+# Run this script with the Python interpreter that has PyInstaller installed:
+#   C:\Python313\python.exe pyinstaller-build-script.py
+# (The system default `python` command may point to a different version.)
 
 def run_pyinstaller_build():
     pyinstaller_command = [
@@ -12,6 +15,15 @@ def run_pyinstaller_build():
         "--name=Writing Tools",
         "--clean",
         "--noconfirm",
+        # Include data files in the bundle
+        "--add-data", "icons;icons",
+        "--add-data", "locales;locales",
+        "--add-data", "background.png;.",
+        "--add-data", "background_dark.png;.",
+        "--add-data", "background_popup.png;.",
+        "--add-data", "background_popup_dark.png;.",
+        "--add-data", "options.json;.",
+        "--add-data", "Latest_Version_for_Update_Check.txt;.",
         # Exclude unnecessary modules
         "--exclude-module", "tkinter",
         "--exclude-module", "unittest",
@@ -88,14 +100,16 @@ def run_pyinstaller_build():
         subprocess.run(pyinstaller_command, check=True)
         print("Build completed successfully!")
 
-        # Clean up unnecessary files
+        # Clean up unnecessary build files
         if os.path.exists('build'):
             os.system("rmdir /s /q build")
         if os.path.exists('__pycache__'):
             os.system("rmdir /s /q __pycache__")
 
-        # No need to copy data files manually since they are included
-        # in the executable using --add-data
+        # Copy options.json next to executable in dist/ for convenient customization
+        import shutil
+        if os.path.exists('options.json'):
+            shutil.copy('options.json', os.path.join('dist', 'options.json'))
 
     except subprocess.CalledProcessError as e:
         print(f"Build failed with error: {e}")

@@ -825,16 +825,26 @@ class WritingToolApp(QtWidgets.QApplication):
                 multi_variation_instruction = self.get_multi_variation_instruction(option, system_instruction)
 
                 # Show the window immediately with placeholder loading cards so
-                # the user sees instant feedback, then fill in results when ready.
+                # the user sees instant feedback, then fill in results progressively.
                 self.show_variation_loading_signal.emit(selected_text)
 
-                response = self.current_provider.get_response(multi_variation_instruction, prompt, return_response=True)
+                last_count = [0]
+                def _stream_chunk_callback(partial_text):
+                    partial_vars = parse_variations_response(partial_text)
+                    if len(partial_vars) > last_count[0]:
+                        last_count[0] = len(partial_vars)
+                        logging.debug(f'Streamed {len(partial_vars)} variation(s) so far')
+                        self.update_preview_variations_signal.emit(partial_vars)
+
+                response = self.current_provider.get_response_stream(
+                    multi_variation_instruction, prompt, on_chunk=_stream_chunk_callback
+                )
                 if not response:
                     logging.debug('Empty response received (request may have been cancelled).')
                     return
 
                 variations = parse_variations_response(response)
-                logging.debug(f'Parsed {len(variations)} variations for option {option}')
+                logging.debug(f'Parsed {len(variations)} final variations for option {option}')
 
                 self.update_preview_variations_signal.emit(variations)
 
@@ -854,8 +864,8 @@ class WritingToolApp(QtWidgets.QApplication):
     def _show_variation_loading_window(self, selected_text):
         """
         Opens the VariationPreviewWindow immediately with a loading state.
-        The background thread will call update_preview_variations_signal when the
-        AI response is ready, which populates the real cards via update_variations().
+        The background thread will call update_preview_variations_signal progressively
+        as variations are streamed, which populates the real cards via update_variations().
         """
         try:
             # Open with empty variations so the window enters loading state.
@@ -952,7 +962,7 @@ class WritingToolApp(QtWidgets.QApplication):
     @Slot(str, str)
     def _handle_refinement_request(self, original_text, instruction):
         """
-        Handles async refinement request from the VariationPreviewWindow.
+        Handles async refinement request from the VariationPreviewWindow with progressive streaming.
         """
         logging.debug(f'Processing refinement request: {instruction}')
 
@@ -972,7 +982,17 @@ class WritingToolApp(QtWidgets.QApplication):
                     "Do not include any extra chat or commentary outside the JSON."
                 )
                 prompt = f"Original Text:\n{original_text}\n\nRefinement Instruction: {instruction}"
-                response = self.current_provider.get_response(multi_variation_instruction, prompt, return_response=True)
+
+                last_count = [0]
+                def _refine_stream_callback(partial_text):
+                    partial_vars = parse_variations_response(partial_text)
+                    if len(partial_vars) > last_count[0]:
+                        last_count[0] = len(partial_vars)
+                        self.update_preview_variations_signal.emit(partial_vars)
+
+                response = self.current_provider.get_response_stream(
+                    multi_variation_instruction, prompt, on_chunk=_refine_stream_callback
+                )
                 variations = parse_variations_response(response)
                 logging.debug(f'Parsed {len(variations)} refined variations')
 

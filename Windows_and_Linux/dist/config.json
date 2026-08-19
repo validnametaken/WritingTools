@@ -1,0 +1,20 @@
+{
+    "shortcut": "ctrl+space",
+    "theme": "gradient",
+    "providers": {
+        "Gemini (Recommended)": {
+            "api_key": "enc:Gwt0GzhiCBRsEQotHRgbOWJjLW87LD4dHAwgIBQFKRB3MCI8Czw2HjAgIAgjAzcIEQNiMRs=",
+            "model_name": "gemini-3.1-flash-lite"
+        }
+    },
+    "locale": "en",
+    "streaming": false,
+    "provider": "Gemini (Recommended)",
+    "is_config_file_updated_for_v8": true,
+    "window_sizes": {
+        "VariationPreviewWindow": [
+            540,
+            640
+        ]
+    }
+}

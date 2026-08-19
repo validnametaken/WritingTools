@@ -378,11 +378,6 @@ class VariationPreviewWindow(QDialog):
         self.scroll_layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_layout.setSpacing(10)
 
-        if self._loading:
-            self._render_loading_state()
-        else:
-            self._render_cards()
-
         self.scroll_area.setWidget(self.scroll_content)
         content_layout.addWidget(self.scroll_area, 1)
 
@@ -461,6 +456,12 @@ class VariationPreviewWindow(QDialog):
 
         content_layout.addLayout(footer_layout)
 
+        # Render cards or loading placeholders once all widgets (including status_label) exist
+        if self._loading:
+            self._render_loading_state()
+        else:
+            self._render_cards()
+
     def _render_loading_state(self):
         """Show placeholder loading cards with a smooth pulsing shimmer animation."""
         is_dark = colorMode == 'dark'
@@ -526,6 +527,9 @@ class VariationPreviewWindow(QDialog):
                     w.deleteLater()
 
         self.card_widgets.clear()
+        self._loading_cards.clear()
+
+        # Render already-completed variations
         for idx, var_info in enumerate(self.variations):
             lbl = var_info.get("label", f"Variation {idx + 1}")
             txt = var_info.get("text", "")
@@ -538,6 +542,29 @@ class VariationPreviewWindow(QDialog):
             card.selected.connect(self._on_variation_selected)
             self.scroll_layout.addWidget(card)
             self.card_widgets.append(card)
+
+        # If still loading and fewer than 3 variations are ready, render placeholders for remaining slots
+        if self._loading and len(self.variations) < 3:
+            is_dark = colorMode == 'dark'
+            for idx in range(len(self.variations), 3):
+                card = QWidget(self.scroll_content)
+                card.setStyleSheet(
+                    f"background-color: {'#2A2A2A' if is_dark else '#EEEEEE'};"
+                    f"border: 1px solid {'#3D3D3D' if is_dark else '#DDDDDD'};"
+                    "border-radius: 8px; padding: 14px;"
+                )
+                card_layout = QVBoxLayout(card)
+                card_layout.setContentsMargins(10, 8, 10, 8)
+                spinner = QLabel(f"Option {idx + 1}  •  Generating variation...")
+                spinner.setStyleSheet(
+                    f"color: {'#888888' if is_dark else '#777777'}; font-size: 13px; font-style: italic; font-weight: 500;"
+                )
+                card_layout.addWidget(spinner)
+                self.scroll_layout.addWidget(card)
+                self._loading_cards.append(card)
+
+            if self._pulse_timer and not self._pulse_timer.isActive():
+                self._pulse_timer.start(50)
 
         self.scroll_layout.addStretch()
 
@@ -556,16 +583,18 @@ class VariationPreviewWindow(QDialog):
     @Slot(list)
     def update_variations(self, new_variations):
         """
-        Updates cards with new variations and restores idle state.
+        Updates cards with new variations. When all 3 are ready, restores idle state.
         """
-        self._loading = False
-        if self._pulse_timer and self._pulse_timer.isActive():
-            self._pulse_timer.stop()
-        self._loading_cards.clear()
+        if len(new_variations) >= 3:
+            self._loading = False
+            if self._pulse_timer and self._pulse_timer.isActive():
+                self._pulse_timer.stop()
+            self._loading_cards.clear()
+            self.set_loading_state(False)
+            self.refine_input.clear()
+
         self.variations = new_variations
         self._render_cards()
-        self.set_loading_state(False)
-        self.refine_input.clear()
 
     def set_loading_state(self, is_loading):
         self.regen_btn.setEnabled(not is_loading)

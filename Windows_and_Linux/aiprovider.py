@@ -127,7 +127,24 @@ def parse_variations_response(raw_text: str) -> list:
 
     cleaned = raw_text.strip()
 
-    # 1. Try JSON parsing (direct or extracted from markdown block)
+    # 1. Try partial streaming JSON extraction (matches completed variation objects in flight)
+    partial_matches = re.findall(
+        r'\{\s*"label"\s*:\s*"([^"]+)"\s*,\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}',
+        cleaned
+    )
+    if partial_matches:
+        variations = []
+        for lbl, txt in partial_matches:
+            try:
+                unescaped = json.loads(f'"{txt}"')
+            except Exception:
+                unescaped = txt.replace('\\"', '"').replace('\\n', '\n')
+            if unescaped.strip():
+                variations.append({"label": lbl, "text": unescaped.strip()})
+        if len(variations) >= 1:
+            return variations[:3]
+
+    # 2. Try standard full JSON parsing (direct or extracted from markdown block)
     json_str = cleaned
     if "```" in json_str:
         match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", json_str, re.IGNORECASE)
@@ -500,7 +517,8 @@ class GeminiProvider(AIProvider):
             "max_output_tokens": 1000,
         }
         if not is_gemma:
-            kwargs["thinking_config"] = genai_types.ThinkingConfig(thinking_level="minimal")  # type: ignore
+            # Explicitly disable thinking overhead for near-instant text generation
+            kwargs["thinking_config"] = genai_types.ThinkingConfig(thinking_budget=0)
             # Enforce native structured JSON mode when prompt specifies JSON output
             if "json" in system_instruction.lower():
                 kwargs["response_mime_type"] = "application/json"
@@ -562,6 +580,49 @@ class GeminiProvider(AIProvider):
                 return ""
             logging.error(f"Error processing Gemini response: {e}")
             self.app.output_ready_signal.emit("An error occurred while processing the response.")
+            return ""
+        finally:
+            self.close_requested = False
+
+    def get_response_stream(self, system_instruction: str, prompt: Any, on_chunk: Any = None) -> str:
+        self.close_requested = False
+        if not self.client:
+            return ""
+
+        cached = RESPONSE_CACHE.get(self.provider_name, self.model_name, system_instruction, prompt)
+        if cached is not None:
+            logging.debug("Returning cached Gemini stream response (0ms)")
+            if on_chunk:
+                on_chunk(cached)
+            return cached
+
+        try:
+            contents = self._messages_to_contents(prompt) if isinstance(prompt, list) else prompt
+
+            full_text = ""
+            for chunk in self.client.models.generate_content_stream(
+                model=self.model_name,
+                contents=contents,
+                config=self._build_config(system_instruction),
+            ):
+                if self.close_requested:
+                    logging.debug("Stream request cancelled by user.")
+                    return ""
+                chunk_text = chunk.text or ""
+                if chunk_text:
+                    full_text += chunk_text
+                    if on_chunk:
+                        on_chunk(full_text)
+
+            full_text = full_text.rstrip('\n')
+            if full_text:
+                RESPONSE_CACHE.put(self.provider_name, self.model_name, system_instruction, prompt, full_text)
+            return full_text
+        except Exception as e:
+            if self.close_requested:
+                logging.debug("Cancelled in-flight Gemini stream cleanly.")
+                return ""
+            logging.error(f"Error streaming Gemini response: {e}")
             return ""
         finally:
             self.close_requested = False

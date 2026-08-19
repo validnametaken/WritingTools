@@ -112,6 +112,25 @@ class VariationCard(QWidget):
         header_layout.addWidget(badge_label)
         header_layout.addStretch()
 
+        # Copy to Clipboard button
+        copy_btn = QPushButton("Copy")
+        copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        copy_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {'#424242' if colorMode == 'dark' else '#E0E0E0'};
+                color: {'#FFFFFF' if colorMode == 'dark' else '#333333'};
+                border: 1px solid {'#555555' if colorMode == 'dark' else '#CCCCCC'};
+                border-radius: 5px;
+                padding: 4px 8px;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: {'#616161' if colorMode == 'dark' else '#D5D5D5'};
+            }}
+        """)
+        copy_btn.clicked.connect(self._on_copy_clicked)
+        header_layout.addWidget(copy_btn)
+
         apply_btn = QPushButton("Apply & Paste")
         apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         apply_btn.setStyleSheet(f"""
@@ -182,6 +201,15 @@ class VariationCard(QWidget):
             self._on_click()
         super().mousePressEvent(event)
 
+    def _on_copy_clicked(self):
+        import pyperclip
+        pyperclip.copy(self.variation_text)
+        sender = self.sender()
+        if isinstance(sender, QPushButton):
+            orig_text = sender.text()
+            sender.setText("✓ Copied")
+            QtCore.QTimer.singleShot(1200, lambda: sender.setText(orig_text))
+
     def _on_click(self):
         self.selected.emit(self.variation_text)
 
@@ -201,6 +229,11 @@ class VariationPreviewWindow(QDialog):
         self.selected_variation = None
         self.show_diff = False
         self.card_widgets = []
+        self._loading = len(self.variations) == 0
+        self._pulse_timer = None
+        self._pulse_alpha = 0
+        self._pulse_direction = 1
+        self._loading_cards = []
 
         self.init_ui()
 
@@ -345,7 +378,10 @@ class VariationPreviewWindow(QDialog):
         self.scroll_layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_layout.setSpacing(10)
 
-        self._render_cards()
+        if self._loading:
+            self._render_loading_state()
+        else:
+            self._render_cards()
 
         self.scroll_area.setWidget(self.scroll_content)
         content_layout.addWidget(self.scroll_area, 1)
@@ -425,6 +461,61 @@ class VariationPreviewWindow(QDialog):
 
         content_layout.addLayout(footer_layout)
 
+    def _render_loading_state(self):
+        """Show placeholder loading cards with a smooth pulsing shimmer animation."""
+        is_dark = colorMode == 'dark'
+        self._loading_cards.clear()
+
+        for i in range(3):
+            card = QWidget(self.scroll_content)
+            card.setStyleSheet(
+                f"background-color: {'#2A2A2A' if is_dark else '#EEEEEE'};"
+                f"border: 1px solid {'#3D3D3D' if is_dark else '#DDDDDD'};"
+                "border-radius: 8px; padding: 14px;"
+            )
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(10, 8, 10, 8)
+            spinner = QLabel(f"Option {i + 1}  •  Generating variation...")
+            spinner.setStyleSheet(
+                f"color: {'#888888' if is_dark else '#777777'}; font-size: 13px; font-style: italic; font-weight: 500;"
+            )
+            card_layout.addWidget(spinner)
+            self.scroll_layout.addWidget(card)
+            self._loading_cards.append(card)
+
+        self.scroll_layout.addStretch()
+        self.status_label.setText("Generating variations...")
+        self.regen_btn.setEnabled(False)
+        self.refine_input.setEnabled(False)
+
+        # Start pulsing shimmer animation timer
+        self._pulse_alpha = 0
+        self._pulse_direction = 1
+        if self._pulse_timer is None:
+            self._pulse_timer = QtCore.QTimer(self)
+            self._pulse_timer.timeout.connect(self._on_pulse_tick)
+        self._pulse_timer.start(50)
+
+    def _on_pulse_tick(self):
+        if not self._loading or not self._loading_cards:
+            if self._pulse_timer and self._pulse_timer.isActive():
+                self._pulse_timer.stop()
+            return
+
+        self._pulse_alpha += 4 * self._pulse_direction
+        if self._pulse_alpha >= 40:
+            self._pulse_direction = -1
+        elif self._pulse_alpha <= 0:
+            self._pulse_direction = 1
+
+        is_dark = colorMode == 'dark'
+        base_bg = 42 + self._pulse_alpha if is_dark else 238 - self._pulse_alpha
+        border_hex = f"#{60 + self._pulse_alpha:02x}{60 + self._pulse_alpha:02x}{60 + self._pulse_alpha:02x}" if is_dark else f"#{200 - self._pulse_alpha:02x}{200 - self._pulse_alpha:02x}{200 - self._pulse_alpha:02x}"
+        bg_hex = f"#{base_bg:02x}{base_bg:02x}{base_bg:02x}"
+
+        for card in self._loading_cards:
+            card.setStyleSheet(f"background-color: {bg_hex}; border: 1px solid {border_hex}; border-radius: 8px; padding: 14px;")
+
     def _render_cards(self):
         # Clear existing cards
         while self.scroll_layout.count():
@@ -467,6 +558,10 @@ class VariationPreviewWindow(QDialog):
         """
         Updates cards with new variations and restores idle state.
         """
+        self._loading = False
+        if self._pulse_timer and self._pulse_timer.isActive():
+            self._pulse_timer.stop()
+        self._loading_cards.clear()
         self.variations = new_variations
         self._render_cards()
         self.set_loading_state(False)
@@ -486,7 +581,10 @@ class VariationPreviewWindow(QDialog):
 
     def keyPressEvent(self, event):
         key = event.key()
-        if key == Qt.Key.Key_1 and len(self.variations) >= 1:
+        # Return / Enter key directly selects Option 1 (if not typing in the refinement box)
+        if (key == Qt.Key.Key_Return or key == Qt.Key.Key_Enter) and not self.refine_input.hasFocus() and len(self.variations) >= 1:
+            self._on_variation_selected(self.variations[0]["text"])
+        elif key == Qt.Key.Key_1 and len(self.variations) >= 1:
             self._on_variation_selected(self.variations[0]["text"])
         elif key == Qt.Key.Key_2 and len(self.variations) >= 2:
             self._on_variation_selected(self.variations[1]["text"])
@@ -496,6 +594,20 @@ class VariationPreviewWindow(QDialog):
             self.reject()
         else:
             super().keyPressEvent(event)
+
+    def reject(self):
+        if self._pulse_timer and self._pulse_timer.isActive():
+            self._pulse_timer.stop()
+        if self.app and hasattr(self.app, 'current_provider') and self.app.current_provider and hasattr(self.app.current_provider, 'cancel'):
+            self.app.current_provider.cancel()
+        super().reject()
+
+    def closeEvent(self, event):
+        if self._pulse_timer and self._pulse_timer.isActive():
+            self._pulse_timer.stop()
+        if self.app and hasattr(self.app, 'current_provider') and self.app.current_provider and hasattr(self.app.current_provider, 'cancel'):
+            self.app.current_provider.cancel()
+        super().closeEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

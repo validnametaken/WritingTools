@@ -49,6 +49,7 @@ class WritingToolApp(QtWidgets.QApplication):
     hotkey_triggered_signal = Signal()
     followup_response_signal = Signal(str)
     show_variation_preview_signal = Signal(str, list)
+    show_variation_loading_signal = Signal(str)   # shows window immediately with loading state
     update_preview_variations_signal = Signal(list)
 
 
@@ -61,6 +62,7 @@ class WritingToolApp(QtWidgets.QApplication):
         self.show_message_signal.connect(self.show_message_box)
         self.hotkey_triggered_signal.connect(self.on_hotkey_pressed)
         self.show_variation_preview_signal.connect(self._show_variation_preview_window)
+        self.show_variation_loading_signal.connect(self._show_variation_loading_window)
         self.update_preview_variations_signal.connect(self._update_current_preview_variations)
         self.config = None
         self.config_path = None
@@ -821,13 +823,26 @@ class WritingToolApp(QtWidgets.QApplication):
             else:
                 logging.debug('Getting 3 variations for preview window selection')
                 multi_variation_instruction = self.get_multi_variation_instruction(option, system_instruction)
+
+                # Show the window immediately with placeholder loading cards so
+                # the user sees instant feedback, then fill in results when ready.
+                self.show_variation_loading_signal.emit(selected_text)
+
                 response = self.current_provider.get_response(multi_variation_instruction, prompt, return_response=True)
+                if not response:
+                    logging.debug('Empty response received (request may have been cancelled).')
+                    return
+
                 variations = parse_variations_response(response)
                 logging.debug(f'Parsed {len(variations)} variations for option {option}')
 
-                self.show_variation_preview_signal.emit(selected_text, variations)
+                self.update_preview_variations_signal.emit(variations)
 
         except Exception as e:
+            if hasattr(self, 'current_provider') and getattr(self.current_provider, 'close_requested', False):
+                logging.debug('Request cancelled cleanly by user dismissal.')
+                return
+
             logging.error(f'An error occurred: {e}', exc_info=True)
 
             if "Resource has been exhausted" in str(e):
@@ -835,10 +850,61 @@ class WritingToolApp(QtWidgets.QApplication):
             else:
                 self.show_message_signal.emit('Error', f'An error occurred: {e}')
 
+    @Slot(str)
+    def _show_variation_loading_window(self, selected_text):
+        """
+        Opens the VariationPreviewWindow immediately with a loading state.
+        The background thread will call update_preview_variations_signal when the
+        AI response is ready, which populates the real cards via update_variations().
+        """
+        try:
+            # Open with empty variations so the window enters loading state.
+            preview_window = ui.VariationPreviewWindow.VariationPreviewWindow(
+                parent=None,
+                original_text=selected_text,
+                variations=[],   # triggers loading placeholder cards
+                app=self
+            )
+            self.current_preview_window = preview_window
+            preview_window.refinement_requested.connect(self._handle_refinement_request)
+            self.update_preview_variations_signal.connect(preview_window.update_variations)
+
+            # Position near cursor
+            cursor_pos = QCursor.pos()
+            screen = QGuiApplication.screenAt(cursor_pos)
+            if screen is None:
+                screen = QGuiApplication.primaryScreen()
+            screen_geom = screen.geometry()
+
+            preview_window.show()
+
+            w = preview_window.width()
+            h = preview_window.height()
+            x = cursor_pos.x()
+            y = cursor_pos.y() + 20
+            if x + w > screen_geom.right():
+                x = screen_geom.right() - w
+            if y + h > screen_geom.bottom():
+                y = cursor_pos.y() - h - 10
+            preview_window.move(x, y)
+            preview_window.activateWindow()
+
+            # Block until user picks a variation or cancels
+            if preview_window.exec_() == QtWidgets.QDialog.DialogCode.Accepted and preview_window.selected_variation:
+                logging.debug('User selected a variation from loading preview window')
+                self.paste_selected_variation(preview_window.selected_variation)
+            else:
+                logging.debug('User cancelled variation loading preview window')
+
+        except Exception as e:
+            logging.error(f'Error displaying variation loading window: {e}', exc_info=True)
+        finally:
+            self.current_preview_window = None
+
     @Slot(str, list)
     def _show_variation_preview_window(self, selected_text, variations):
         """
-        Shows the VariationPreviewWindow on the main UI thread.
+        Shows the VariationPreviewWindow on the main UI thread (legacy path with pre-loaded variations).
         """
         try:
             preview_window = ui.VariationPreviewWindow.VariationPreviewWindow(

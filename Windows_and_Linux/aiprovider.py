@@ -32,12 +32,52 @@ Note: Streaming has been fully removed throughout the code.
 """
 
 import base64
+from collections import OrderedDict
+import hashlib
 import json
 import logging
 import re
+import threading
 import webbrowser
 from abc import ABC, abstractmethod
 from typing import List, Sequence, Any
+
+
+class ResponseLRUCache:
+    """Thread-safe in-memory LRU cache for prompt responses."""
+    def __init__(self, capacity: int = 50):
+        self.capacity = capacity
+        self.cache: OrderedDict[str, str] = OrderedDict()
+        self.lock = threading.Lock()
+
+    def _make_key(self, provider: str, model: str, system_instruction: str, prompt: Any) -> str:
+        raw = f"{provider}:{model}:{system_instruction}:{prompt}"
+        return hashlib.sha256(raw.encode('utf-8', errors='ignore')).hexdigest()
+
+    def get(self, provider: str, model: str, system_instruction: str, prompt: Any) -> str | None:
+        key = self._make_key(provider, model, system_instruction, prompt)
+        with self.lock:
+            if key in self.cache:
+                self.cache.move_to_end(key)
+                return self.cache[key]
+        return None
+
+    def put(self, provider: str, model: str, system_instruction: str, prompt: Any, response: str) -> None:
+        if not response or not response.strip():
+            return
+        key = self._make_key(provider, model, system_instruction, prompt)
+        with self.lock:
+            self.cache[key] = response
+            self.cache.move_to_end(key)
+            if len(self.cache) > self.capacity:
+                self.cache.popitem(last=False)
+
+    def clear(self) -> None:
+        with self.lock:
+            self.cache.clear()
+
+
+RESPONSE_CACHE = ResponseLRUCache(capacity=50)
 
 # External libraries
 from google import genai
@@ -454,13 +494,16 @@ class GeminiProvider(AIProvider):
 
     def _build_config(self, system_instruction: str) -> "genai_types.GenerateContentConfig":
         is_gemma = "gemma" in (getattr(self, 'model_name', '') or "").lower()
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "system_instruction": system_instruction,
             "safety_settings": self._SAFETY_SETTINGS,
             "max_output_tokens": 1000,
         }
         if not is_gemma:
             kwargs["thinking_config"] = genai_types.ThinkingConfig(thinking_level="minimal")  # type: ignore
+            # Enforce native structured JSON mode when prompt specifies JSON output
+            if "json" in system_instruction.lower():
+                kwargs["response_mime_type"] = "application/json"
         return genai_types.GenerateContentConfig(**kwargs)
 
     @staticmethod
@@ -480,6 +523,16 @@ class GeminiProvider(AIProvider):
         if not self.client:
             return ""
 
+        # Check in-memory LRU cache first
+        cached = RESPONSE_CACHE.get(self.provider_name, self.model_name, system_instruction, prompt)
+        if cached is not None:
+            logging.debug("Returning cached Gemini response (0ms)")
+            if not return_response and not hasattr(self.app, 'current_response_window'):
+                self.app.output_ready_signal.emit(cached)
+                self.app.replace_text(True)
+                return ""
+            return cached
+
         try:
             contents = self._messages_to_contents(prompt) if isinstance(prompt, list) else prompt
 
@@ -489,7 +542,14 @@ class GeminiProvider(AIProvider):
                 config=self._build_config(system_instruction),
             )
 
+            if self.close_requested:
+                logging.debug("Request was cancelled by user dismissal.")
+                return ""
+
             response_text = (response.text or "").rstrip('\n')
+
+            if response_text:
+                RESPONSE_CACHE.put(self.provider_name, self.model_name, system_instruction, prompt, response_text)
 
             if not return_response and not hasattr(self.app, 'current_response_window'):
                 self.app.output_ready_signal.emit(response_text)
@@ -497,6 +557,9 @@ class GeminiProvider(AIProvider):
                 return ""
             return response_text
         except Exception as e:
+            if self.close_requested:
+                logging.debug("Cancelled in-flight Gemini request cleanly.")
+                return ""
             logging.error(f"Error processing Gemini response: {e}")
             self.app.output_ready_signal.emit("An error occurred while processing the response.")
             return ""
@@ -565,6 +628,13 @@ class OpenAICompatibleProvider(AIProvider):
         if not self.client:
             return ""
 
+        cached = RESPONSE_CACHE.get(self.provider_name, self.api_model, system_instruction, prompt)
+        if cached is not None:
+            logging.debug("Returning cached OpenAI-compatible response (0ms)")
+            if not return_response and not hasattr(self.app, 'current_response_window'):
+                self.app.output_ready_signal.emit(cached)
+            return cached
+
         if isinstance(prompt, list):
             messages = prompt
         else:
@@ -580,13 +650,24 @@ class OpenAICompatibleProvider(AIProvider):
                 temperature=0.5,
                 stream=False
             )
+
+            if self.close_requested:
+                logging.debug("Request was cancelled by user dismissal.")
+                return ""
+
             response_text = (response.choices[0].message.content or "").strip()
+
+            if response_text:
+                RESPONSE_CACHE.put(self.provider_name, self.api_model, system_instruction, prompt, response_text)
 
             if not return_response and not hasattr(self.app, 'current_response_window'):
                 self.app.output_ready_signal.emit(response_text)
             return response_text
 
         except Exception as e:
+            if self.close_requested:
+                logging.debug("Cancelled in-flight OpenAI request cleanly.")
+                return ""
             error_str = str(e)
             logging.error(f"Error while generating content: {error_str}")
             if "exceeded" in error_str or "rate limit" in error_str:
@@ -640,6 +721,13 @@ class OllamaProvider(AIProvider):
         if not self.client:
             return ""
 
+        cached = RESPONSE_CACHE.get(self.provider_name, self.api_model, system_instruction, prompt)
+        if cached is not None:
+            logging.debug("Returning cached Ollama response (0ms)")
+            if not return_response and not hasattr(self.app, 'current_response_window'):
+                self.app.output_ready_signal.emit(cached)
+            return cached
+
         if isinstance(prompt, list):
             messages = prompt
         else:
@@ -650,11 +738,21 @@ class OllamaProvider(AIProvider):
 
         try:
             response = self.client.chat(model=self.api_model, messages=messages)
+            if self.close_requested:
+                logging.debug("Request was cancelled by user dismissal.")
+                return ""
+
             response_text = response['message']['content'].strip()
+            if response_text:
+                RESPONSE_CACHE.put(self.provider_name, self.api_model, system_instruction, prompt, response_text)
+
             if not return_response and not hasattr(self.app, 'current_response_window'):
                 self.app.output_ready_signal.emit(response_text)
             return response_text
         except Exception as e:
+            if self.close_requested:
+                logging.debug("Cancelled in-flight Ollama request cleanly.")
+                return ""
             logging.error(f"Error during Ollama chat: {e}")
             self.app.output_ready_signal.emit("An error occurred during Ollama chat.")
             return ""

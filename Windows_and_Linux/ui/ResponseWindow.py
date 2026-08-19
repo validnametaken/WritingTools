@@ -757,6 +757,9 @@ class ResponseWindow(QtWidgets.QWidget):
             self.app.config['response_window_zoom'] = self.current_text_display.zoom_factor
             self.app.save_config(self.app.config)
 
+        if hasattr(self, 'app') and hasattr(self.app, 'current_provider') and self.app.current_provider and hasattr(self.app.current_provider, 'cancel'):
+            self.app.current_provider.cancel()
+
         self.chat_history = []
         
         if hasattr(self.app, 'current_response_window'):

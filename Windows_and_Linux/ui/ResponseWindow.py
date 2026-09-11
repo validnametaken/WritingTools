@@ -744,14 +744,32 @@ class ResponseWindow(QtWidgets.QWidget):
                 
         QtWidgets.QApplication.clipboard().setText(markdown)
         
+    def _persist_geometry(self):
+        if self.isMinimized() or self.isMaximized():
+            return
+        if hasattr(self, 'app') and self.app and hasattr(self.app, 'save_window_geometry'):
+            pos = self.pos()
+            size = self.size()
+            self.app.save_window_geometry('ResponseWindow', pos.x(), pos.y(), size.width(), size.height())
+
+    def _schedule_save_geometry(self):
+        if not hasattr(self, '_geom_save_timer'):
+            self._geom_save_timer = QtCore.QTimer(self)
+            self._geom_save_timer.setSingleShot(True)
+            self._geom_save_timer.timeout.connect(self._persist_geometry)
+        self._geom_save_timer.start(300)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, 'app') and self.app and hasattr(self.app, 'save_window_size'):
-            size = event.size()
-            self.app.save_window_size('ResponseWindow', size.width(), size.height())
+        self._schedule_save_geometry()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._schedule_save_geometry()
 
     def closeEvent(self, event):
         """Handle window close event"""
+        self._persist_geometry()
         # Save zoom factor to main config
         if hasattr(self, 'current_text_display'):
             self.app.config['response_window_zoom'] = self.current_text_display.zoom_factor

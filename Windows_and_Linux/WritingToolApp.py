@@ -86,6 +86,7 @@ class WritingToolApp(QtWidgets.QApplication):
         self.hotkey_listener = None
         self.paused = False
         self.toggle_action = None
+        self.last_active_window = None
 
         # Holder for the user's selected text. Populated asynchronously by a
         # background thread so the popup can show instantly — see `_show_popup`
@@ -355,6 +356,72 @@ class WritingToolApp(QtWidgets.QApplication):
             self.config['window_sizes'][window_name] = [width, height]
             self.save_config(self.config)
 
+    def save_window_geometry(self, window_name, x, y, width, height):
+        """
+        Save window location (x, y) and dimensions (width, height) to config.json.
+        """
+        if not hasattr(self, 'config') or self.config is None:
+            self.config = {}
+        if 'window_geometries' not in self.config:
+            self.config['window_geometries'] = {}
+        if 'window_sizes' not in self.config:
+            self.config['window_sizes'] = {}
+
+        self.config['window_sizes'][window_name] = [width, height]
+        if self.config['window_geometries'].get(window_name) != [x, y, width, height]:
+            self.config['window_geometries'][window_name] = [x, y, width, height]
+            self.save_config(self.config)
+
+    def apply_window_geometry(self, window, window_name, fallback_width=540, fallback_height=640, near_cursor=False):
+        """
+        Applies saved window geometry (position and size), clamping to the active screen's
+        available work area (excluding taskbar) so the window fits comfortably on laptops or small screens.
+        """
+        cursor_pos = QCursor.pos()
+        screen = QGuiApplication.screenAt(cursor_pos)
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+
+        saved_geom = self.config.get('window_geometries', {}).get(window_name) if self.config else None
+        saved_size = self.config.get('window_sizes', {}).get(window_name) if self.config else None
+
+        if saved_geom and len(saved_geom) == 4:
+            x, y, w, h = saved_geom
+            # Check which screen contains the saved point
+            saved_screen = QGuiApplication.screenAt(QtCore.QPoint(x, y))
+            if saved_screen is not None:
+                screen = saved_screen
+            avail = screen.availableGeometry()
+            w = max(window.minimumWidth(), min(w, avail.width()))
+            h = max(window.minimumHeight(), min(h, avail.height()))
+            # Clamp position within available work area
+            x = max(avail.left(), min(x, avail.right() - w))
+            y = max(avail.top(), min(y, avail.bottom() - h))
+        else:
+            avail = screen.availableGeometry()
+            if saved_size and len(saved_size) == 2:
+                w, h = saved_size
+            else:
+                w, h = fallback_width, fallback_height
+            w = max(window.minimumWidth(), min(w, avail.width()))
+            h = max(window.minimumHeight(), min(h, avail.height()))
+
+            if near_cursor:
+                x = cursor_pos.x()
+                y = cursor_pos.y() + 20
+                if x + w > avail.right():
+                    x = avail.right() - w
+                if y + h > avail.bottom():
+                    y = cursor_pos.y() - h - 10
+                x = max(avail.left(), min(x, avail.right() - w))
+                y = max(avail.top(), min(y, avail.bottom() - h))
+            else:
+                x = avail.left() + (avail.width() - w) // 2
+                y = avail.top() + (avail.height() - h) // 2
+
+        window.resize(w, h)
+        window.move(x, y)
+
     def get_multi_variation_instruction(self, option, system_instruction):
         """
         Builds a multi-variation prompt tailored specifically to the given option/command.
@@ -459,6 +526,7 @@ class WritingToolApp(QtWidgets.QApplication):
                 def on_global_activate():
                     if self.paused:
                         return
+                    self._capture_active_window()
                     logging.debug('triggered global hotkey')
                     self.hotkey_triggered_signal.emit()
 
@@ -504,6 +572,34 @@ class WritingToolApp(QtWidgets.QApplication):
         except Exception as e:
             logging.error(f'Failed to register hotkey listener: {e}')
 
+    def _capture_active_window(self):
+        """Capture the currently active/foreground window so we can restore focus later."""
+        if sys.platform.startswith('win32'):
+            try:
+                import ctypes
+                self.last_active_window = ctypes.windll.user32.GetForegroundWindow()
+                logging.debug(f'Captured active window HWND: {self.last_active_window}')
+            except Exception as e:
+                logging.error(f'Error capturing active window HWND: {e}')
+                self.last_active_window = None
+        else:
+            self.last_active_window = None
+
+    def _restore_active_window(self):
+        """Restore focus to the previously active window before simulating paste."""
+        if sys.platform.startswith('win32') and self.last_active_window:
+            try:
+                import ctypes
+                user32 = ctypes.windll.user32
+                hwnd = self.last_active_window
+                if user32.IsWindow(hwnd):
+                    if user32.IsIconic(hwnd):
+                        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    user32.SetForegroundWindow(hwnd)
+                    time.sleep(0.08)  # Allow Windows to transition focus
+            except Exception as e:
+                logging.error(f'Error restoring active window: {e}')
+
     def _make_button_hotkey_callback(self, button_name):
         """
         Build a callback that fires `button_name` directly, bypassing the
@@ -517,6 +613,7 @@ class WritingToolApp(QtWidgets.QApplication):
         def callback():
             if self.paused:
                 return
+            self._capture_active_window()
             logging.debug(f'Direct hotkey fired for button "{button_name}"')
             # Match the global hotkey's behaviour: cancel any in-flight
             # request so a new fire doesn't pile up on top of a previous one.
@@ -575,6 +672,7 @@ class WritingToolApp(QtWidgets.QApplication):
         """
         Handle the hotkey press event.
         """
+        self._capture_active_window()
         logging.debug('Hotkey pressed')
         
         # Check for spam triggers
@@ -595,23 +693,26 @@ class WritingToolApp(QtWidgets.QApplication):
     @Slot()
     def _show_popup(self):
         """
-        Show the popup window the moment the hotkey fires, and capture the
-        user's selected text in parallel — popup display no longer waits on
-        the clipboard. The old behaviour gated popup show on a 0.2-0.5s
-        clipboard read, which on slower systems would time out and
-        incorrectly fall back to the chat-only "Ask your AI" UI even when
-        text *was* selected. We now assume text is always selected;
-        `process_option_thread` waits on the holder before kicking off the
-        AI request.
+        Initiate selected text capture and schedule popup display.
+        We delay showing the popup by ~75ms so the target application (Chrome,
+        Edge, Word, etc.) has adequate time to receive and process simulated Ctrl+C
+        while still being the active foreground window.
         """
         logging.debug('Showing popup window')
 
         # Fresh holder per popup. Fire Ctrl+C *before* we create the popup
-        # so the keystroke is queued while focus is still on the user's
-        # source app — the actual clipboard read happens in the background.
+        # so the keystroke is queued while focus is still on the user's source app.
         self.current_text_holder = _SelectedTextHolder()
         self._fire_ctrl_c_and_capture_async(self.current_text_holder)
 
+        # Brief delay before showing/activating popup to prevent stealing foreground focus prematurely
+        QtCore.QTimer.singleShot(75, self._display_popup_window)
+
+    def _display_popup_window(self):
+        """
+        Creates and positions the CustomPopupWindow after the target app
+        has had time to process the copy keystroke.
+        """
         try:
             if self.popup_window is not None:
                 logging.debug('Existing popup window found')
@@ -630,9 +731,10 @@ class WritingToolApp(QtWidgets.QApplication):
             screen = QGuiApplication.screenAt(cursor_pos)
             if screen is None:
                 screen = QGuiApplication.primaryScreen()
-            screen_geometry = screen.geometry()
+            # Use availableGeometry to avoid overlapping the taskbar
+            screen_geometry = screen.availableGeometry()
             logging.debug(f'Cursor is on screen: {screen.name()}')
-            logging.debug(f'Screen geometry: {screen_geometry}')
+            logging.debug(f'Screen available geometry: {screen_geometry}')
             # Show the popup to get its size
             self.popup_window.show()
             self.popup_window.adjustSize()
@@ -645,12 +747,14 @@ class WritingToolApp(QtWidgets.QApplication):
             # Calculate position
             x = cursor_pos.x()
             y = cursor_pos.y() + 20  # 20 pixels below cursor
-            # Adjust if the popup would go off the right edge of the screen
+            # Adjust if the popup would go off the right edge of the work area
             if x + popup_width > screen_geometry.right():
                 x = screen_geometry.right() - popup_width
-            # Adjust if the popup would go off the bottom edge of the screen
+            # Adjust if the popup would go off the bottom edge of the work area
             if y + popup_height > screen_geometry.bottom():
                 y = cursor_pos.y() - popup_height - 10  # 10 pixels above cursor
+            x = max(screen_geometry.left(), min(x, screen_geometry.right() - popup_width))
+            y = max(screen_geometry.top(), min(y, screen_geometry.bottom() - popup_height))
             self.popup_window.move(x, y)
             logging.debug(f'Popup window moved to position: ({x}, {y})')
         except Exception as e:
@@ -661,7 +765,7 @@ class WritingToolApp(QtWidgets.QApplication):
         Inject Ctrl+C now (must happen while focus is still on the user's
         source app, before the popup is shown), then poll the clipboard
         for the result in a background thread. Returns immediately so the
-        popup can display with no perceptible delay.
+        popup can display with minimal delay.
 
         Slow systems' clipboard subsystems can take a while to populate
         after Ctrl+C — that's the whole reason this is async. The polling
@@ -678,10 +782,23 @@ class WritingToolApp(QtWidgets.QApplication):
 
         kbrd = pykeyboard.Controller()
         try:
-            kbrd.press(pykeyboard.Key.ctrl.value)
+            # Release trigger/modifier keys that might still be physically held down
+            # (e.g. Space when using Ctrl+Space, or Alt/Shift) so the target app
+            # registers a pure Ctrl+C instead of Ctrl+Space+C.
+            for mod_key in (pykeyboard.Key.space, pykeyboard.Key.alt, pykeyboard.Key.shift):
+                try:
+                    kbrd.release(mod_key)
+                except Exception:
+                    pass
+
+            time.sleep(0.015)
+            kbrd.press(pykeyboard.Key.ctrl)
+            time.sleep(0.015)
             kbrd.press('c')
+            time.sleep(0.015)
             kbrd.release('c')
-            kbrd.release(pykeyboard.Key.ctrl.value)
+            time.sleep(0.015)
+            kbrd.release(pykeyboard.Key.ctrl)
         except Exception as e:
             logging.error(f'Error simulating Ctrl+C: {e}')
 
@@ -879,24 +996,8 @@ class WritingToolApp(QtWidgets.QApplication):
             preview_window.refinement_requested.connect(self._handle_refinement_request)
             self.update_preview_variations_signal.connect(preview_window.update_variations)
 
-            # Position near cursor
-            cursor_pos = QCursor.pos()
-            screen = QGuiApplication.screenAt(cursor_pos)
-            if screen is None:
-                screen = QGuiApplication.primaryScreen()
-            screen_geom = screen.geometry()
-
             preview_window.show()
-
-            w = preview_window.width()
-            h = preview_window.height()
-            x = cursor_pos.x()
-            y = cursor_pos.y() + 20
-            if x + w > screen_geom.right():
-                x = screen_geom.right() - w
-            if y + h > screen_geom.bottom():
-                y = cursor_pos.y() - h - 10
-            preview_window.move(x, y)
+            self.apply_window_geometry(preview_window, 'VariationPreviewWindow', fallback_width=540, fallback_height=640, near_cursor=True)
             preview_window.activateWindow()
 
             # Block until user picks a variation or cancels
@@ -926,26 +1027,8 @@ class WritingToolApp(QtWidgets.QApplication):
             self.current_preview_window = preview_window
             preview_window.refinement_requested.connect(self._handle_refinement_request)
 
-            # Position preview window near cursor
-            cursor_pos = QCursor.pos()
-            screen = QGuiApplication.screenAt(cursor_pos)
-            if screen is None:
-                screen = QGuiApplication.primaryScreen()
-            screen_geom = screen.geometry()
-
             preview_window.show()
-
-            w = preview_window.width()
-            h = preview_window.height()
-            x = cursor_pos.x()
-            y = cursor_pos.y() + 20
-
-            if x + w > screen_geom.right():
-                x = screen_geom.right() - w
-            if y + h > screen_geom.bottom():
-                y = cursor_pos.y() - h - 10
-
-            preview_window.move(x, y)
+            self.apply_window_geometry(preview_window, 'VariationPreviewWindow', fallback_width=540, fallback_height=640, near_cursor=True)
             preview_window.activateWindow()
 
             if preview_window.exec_() == QtWidgets.QDialog.DialogCode.Accepted and preview_window.selected_variation:
@@ -1020,8 +1103,8 @@ class WritingToolApp(QtWidgets.QApplication):
 
     def paste_selected_variation(self, text):
         """
-        Copies selected variation to clipboard, simulates Ctrl+V paste into active application,
-        and restores previous clipboard content.
+        Copies selected variation to clipboard, restores focus to the active target application,
+        simulates Ctrl+V paste into active application, and restores previous clipboard content.
         """
         try:
             clipboard_backup = pyperclip.paste()
@@ -1029,16 +1112,22 @@ class WritingToolApp(QtWidgets.QApplication):
             clipboard_backup = ''
 
         try:
+            self._restore_active_window()
+
             cleaned_text = text.rstrip('\n')
             pyperclip.copy(cleaned_text)
 
             kbrd = pykeyboard.Controller()
-            kbrd.press(pykeyboard.Key.ctrl.value)
+            time.sleep(0.02)
+            kbrd.press(pykeyboard.Key.ctrl)
+            time.sleep(0.02)
             kbrd.press('v')
+            time.sleep(0.02)
             kbrd.release('v')
-            kbrd.release(pykeyboard.Key.ctrl.value)
+            time.sleep(0.02)
+            kbrd.release(pykeyboard.Key.ctrl)
 
-            time.sleep(0.2)
+            time.sleep(0.5)
         except Exception as e:
             logging.error(f'Error pasting selected variation: {e}')
         finally:
@@ -1059,12 +1148,10 @@ class WritingToolApp(QtWidgets.QApplication):
         Show the response in a new window instead of pasting it.
         """
         response_window = ui.ResponseWindow.ResponseWindow(self, f"{option} Result")
-        saved_size = self.config.get('window_sizes', {}).get('ResponseWindow') if self.config else None
-        if saved_size and len(saved_size) == 2:
-            response_window.resize(saved_size[0], saved_size[1])
-            response_window._size_initialized = True
         response_window.selected_text = text  # Store the text for regeneration
         response_window.show()
+        self.apply_window_geometry(response_window, 'ResponseWindow', fallback_width=600, fallback_height=450, near_cursor=False)
+        response_window._size_initialized = True
         return response_window
 
     def replace_text(self, new_text):
@@ -1104,19 +1191,25 @@ class WritingToolApp(QtWidgets.QApplication):
                         })
                 else:
                     # For other options, use the original clipboard-based replacement
+                    self._restore_active_window()
+
                     clipboard_backup = pyperclip.paste()
                     cleaned_text = self.output_queue.rstrip('\n')
                     pyperclip.copy(cleaned_text)
                     
                     kbrd = pykeyboard.Controller()
                     def press_ctrl_v():
-                        kbrd.press(pykeyboard.Key.ctrl.value)
+                        time.sleep(0.02)
+                        kbrd.press(pykeyboard.Key.ctrl)
+                        time.sleep(0.02)
                         kbrd.press('v')
+                        time.sleep(0.02)
                         kbrd.release('v')
-                        kbrd.release(pykeyboard.Key.ctrl.value)
+                        time.sleep(0.02)
+                        kbrd.release(pykeyboard.Key.ctrl)
 
                     press_ctrl_v()
-                    time.sleep(0.2)
+                    time.sleep(0.5)
                     pyperclip.copy(clipboard_backup)
 
                 if not hasattr(self, 'current_response_window'):

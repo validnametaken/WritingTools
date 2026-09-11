@@ -624,7 +624,35 @@ class VariationPreviewWindow(QDialog):
         else:
             super().keyPressEvent(event)
 
+    def _persist_geometry(self):
+        if self.isMinimized() or self.isMaximized():
+            return
+        if hasattr(self, 'app') and self.app and hasattr(self.app, 'save_window_geometry'):
+            pos = self.pos()
+            size = self.size()
+            self.app.save_window_geometry('VariationPreviewWindow', pos.x(), pos.y(), size.width(), size.height())
+
+    def _schedule_save_geometry(self):
+        if not hasattr(self, '_geom_save_timer'):
+            self._geom_save_timer = QtCore.QTimer(self)
+            self._geom_save_timer.setSingleShot(True)
+            self._geom_save_timer.timeout.connect(self._persist_geometry)
+        self._geom_save_timer.start(300)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._schedule_save_geometry()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._schedule_save_geometry()
+
+    def accept(self):
+        self._persist_geometry()
+        super().accept()
+
     def reject(self):
+        self._persist_geometry()
         if self._pulse_timer and self._pulse_timer.isActive():
             self._pulse_timer.stop()
         if self.app and hasattr(self.app, 'current_provider') and self.app.current_provider and hasattr(self.app.current_provider, 'cancel'):
@@ -632,14 +660,9 @@ class VariationPreviewWindow(QDialog):
         super().reject()
 
     def closeEvent(self, event):
+        self._persist_geometry()
         if self._pulse_timer and self._pulse_timer.isActive():
             self._pulse_timer.stop()
         if self.app and hasattr(self.app, 'current_provider') and self.app.current_provider and hasattr(self.app.current_provider, 'cancel'):
             self.app.current_provider.cancel()
         super().closeEvent(event)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if hasattr(self, 'app') and self.app and hasattr(self.app, 'save_window_size'):
-            size = event.size()
-            self.app.save_window_size('VariationPreviewWindow', size.width(), size.height())
